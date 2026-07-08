@@ -7,7 +7,9 @@ SCHEMA_VERSION = "1.0"
 PROMPT_VERSION = "security-triage-2026-04-29"
 TARGET_REPO = "flatcar/Flatcar"
 FLATCAR_PRODUCTION_SBOM_URL = "https://alpha.release.flatcar-linux.net/amd64-usr/current/flatcar_production_image_sbom.json"
-ADVISORY_ISSUE_QUERY = "repo:flatcar/Flatcar is:issue is:open label:advisory label:security"
+ADVISORY_ISSUE_QUERY = (
+    "repo:flatcar/Flatcar is:issue is:open label:advisory label:security"
+)
 
 REQUIRED_LABELS = {"advisory", "security"}
 ALLOWED_LABELS = {
@@ -27,8 +29,20 @@ DISCOVERY_ACTIONS = {
     "kernel_regular_update_flow",
     "needs_manual_review",
 }
-RELEVANCE_STATUSES = {"relevant", "not_relevant", "needs_manual_review", "kernel_regular_update_flow"}
-RELEVANCE_SCOPES = {"production", "sdk_only", "sysext", "build_only", "not_shipped", "unknown"}
+RELEVANCE_STATUSES = {
+    "relevant",
+    "not_relevant",
+    "needs_manual_review",
+    "kernel_regular_update_flow",
+}
+RELEVANCE_SCOPES = {
+    "production",
+    "sdk_only",
+    "sysext",
+    "build_only",
+    "not_shipped",
+    "unknown",
+}
 SBOM_MATCH_ASSESSMENT_STATUSES = {
     "confirmed_match",
     "plausible_match",
@@ -50,9 +64,13 @@ MAX_GENTOO_REF_LENGTH = 400
 
 _CVE_RE = re.compile(r"\bCVE-\d{4}-\d{4,}\b", re.IGNORECASE)
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]+")
-_MENTION_RE = re.compile(r"(^|[^\w`])@([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:/[A-Za-z0-9._-]+)?)")
+_MENTION_RE = re.compile(
+    r"(^|[^\w`])@([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:/[A-Za-z0-9._-]+)?)"
+)
 _CVSS_RE = re.compile(r"(?<!\d)(10(?:\.0)?|[0-9](?:\.\d)?)(?!\d)")
-_KERNEL_RE = re.compile(r"\b(linux|linux-kernel|kernel|sys-kernel|kernel-cve)\b", re.IGNORECASE)
+_KERNEL_RE = re.compile(
+    r"\b(linux|linux-kernel|kernel|sys-kernel|kernel-cve)\b", re.IGNORECASE
+)
 _STRIKETHROUGH_RE = re.compile(r"(?:~~.*?~~|~[^~]*~)", re.DOTALL)
 
 
@@ -162,7 +180,11 @@ def scope_labels(scope: str | None, scope_assessment: str | None = None) -> list
     return labels
 
 
-def issue_labels(cvss_scores: list[Any] | str | None, scope: str | None, scope_assessment: str | None = None) -> list[str]:
+def issue_labels(
+    cvss_scores: list[Any] | str | None,
+    scope: str | None,
+    scope_assessment: str | None = None,
+) -> list[str]:
     labels = ["advisory", "security"]
     labels.extend(scope_labels(scope, scope_assessment))
     label = severity_label(cvss_scores)
@@ -188,7 +210,11 @@ def render_issue_body(
     gentoo_ref: str | None,
 ) -> str:
     cve_text = ", ".join(sanitize_single_line(cve) for cve in cves) if cves else "TBD"
-    cvss_text = ", ".join(sanitize_single_line(score) for score in cvss_scores or []) if cvss_scores else "n/a"
+    cvss_text = (
+        ", ".join(sanitize_single_line(score) for score in cvss_scores or [])
+        if cvss_scores
+        else "n/a"
+    )
     return (
         f"Name: {sanitize_single_line(package_name)}\n"
         f"CVEs: {cve_text}\n"
@@ -204,7 +230,13 @@ def is_kernel_advisory(package_name: str | None, title: str | None = None) -> bo
     if not text:
         return False
     normalized = normalize_name(package_name)
-    return normalized in {"linux", "kernel", "linux-kernel", "sys-kernel", "gentoo-kernel"} or bool(_KERNEL_RE.search(text))
+    return normalized in {
+        "linux",
+        "kernel",
+        "linux-kernel",
+        "sys-kernel",
+        "gentoo-kernel",
+    } or bool(_KERNEL_RE.search(text))
 
 
 def coerce_confidence(value: Any, default: str = "low") -> str:
@@ -214,23 +246,50 @@ def coerce_confidence(value: Any, default: str = "low") -> str:
 
 def coerce_extraction(data: dict[str, Any] | None) -> dict[str, Any]:
     source = data or {}
-    cves = [sanitize_single_line(str(cve).upper()) for cve in source.get("cves", []) if str(cve).strip()]
+    cves = [
+        sanitize_single_line(str(cve).upper())
+        for cve in source.get("cves", [])
+        if str(cve).strip()
+    ]
     if not cves:
-        cves = extract_cves(" ".join(str(source.get(key, "")) for key in ("summary", "raw_text", "title")))
+        cves = extract_cves(
+            " ".join(
+                str(source.get(key, "")) for key in ("summary", "raw_text", "title")
+            )
+        )
     cvss_scores = parse_cvss_scores(source.get("cvss_scores", []))
-    fixed_versions = [sanitize_single_line(str(item)) for item in source.get("fixed_versions", []) if str(item).strip()]
+    fixed_versions = [
+        sanitize_single_line(str(item))
+        for item in source.get("fixed_versions", [])
+        if str(item).strip()
+    ]
     action_needed = sanitize_single_line(str(source.get("action_needed") or "")) or None
     if not action_needed and fixed_versions:
         action_needed = f"update to >= {fixed_versions[0]}"
     return {
-        "package_name": sanitize_single_line(str(source.get("package_name") or ""))[:MAX_PACKAGE_NAME_LENGTH],
+        "package_name": sanitize_single_line(str(source.get("package_name") or ""))[
+            :MAX_PACKAGE_NAME_LENGTH
+        ],
         "cves": cves,
         "cvss_scores": cvss_scores,
-        "affected_versions": [sanitize_single_line(str(item)) for item in source.get("affected_versions", []) if str(item).strip()],
+        "affected_versions": [
+            sanitize_single_line(str(item))
+            for item in source.get("affected_versions", [])
+            if str(item).strip()
+        ],
         "fixed_versions": fixed_versions,
-        "action_needed": truncate_text(neutralize_mentions(action_needed or "TBD"), MAX_ACTION_NEEDED_LENGTH),
-        "summary": truncate_text(neutralize_mentions(sanitize_single_line(str(source.get("summary") or "")) or "TBD"), MAX_SUMMARY_LENGTH),
-        "gentoo_ref": (sanitize_single_line(str(source.get("gentoo_ref") or "")) or "TBD")[:MAX_GENTOO_REF_LENGTH],
+        "action_needed": truncate_text(
+            neutralize_mentions(action_needed or "TBD"), MAX_ACTION_NEEDED_LENGTH
+        ),
+        "summary": truncate_text(
+            neutralize_mentions(
+                sanitize_single_line(str(source.get("summary") or "")) or "TBD"
+            ),
+            MAX_SUMMARY_LENGTH,
+        ),
+        "gentoo_ref": (
+            sanitize_single_line(str(source.get("gentoo_ref") or "")) or "TBD"
+        )[:MAX_GENTOO_REF_LENGTH],
         "scope_assessment": str(source.get("scope_assessment") or "unknown").strip(),
         "confidence": coerce_confidence(source.get("confidence")),
     }
@@ -246,7 +305,9 @@ def coerce_relevance(data: dict[str, Any] | None) -> dict[str, Any]:
         "llm_decision": str(source.get("llm_decision") or source.get("decision") or ""),
         "reasons": _string_list(source.get("reasons")),
         "evidence": _string_list(source.get("evidence")),
-        "sbom_match_assessment": coerce_sbom_match_assessment(source.get("sbom_match_assessment")),
+        "sbom_match_assessment": coerce_sbom_match_assessment(
+            source.get("sbom_match_assessment")
+        ),
     }
 
 
@@ -254,7 +315,9 @@ def coerce_sbom_match_assessment(data: Any) -> dict[str, Any]:
     source = data if isinstance(data, dict) else {}
     status = str(source.get("status") or "needs_manual_review")
     return {
-        "status": status if status in SBOM_MATCH_ASSESSMENT_STATUSES else "needs_manual_review",
+        "status": status
+        if status in SBOM_MATCH_ASSESSMENT_STATUSES
+        else "needs_manual_review",
         "reason": str(source.get("reason") or ""),
         "related_matches": _string_list(source.get("related_matches")),
         "unrelated_matches": _string_list(source.get("unrelated_matches")),
@@ -302,24 +365,39 @@ def apply_discovery_guardrails(
         relevance = {
             "status": "kernel_regular_update_flow",
             "scope": "production",
-            "llm_decision": relevance.get("llm_decision") or "Kernel CVEs use the regular Flatcar kernel update flow.",
-            "reasons": [*relevance.get("reasons", []), "Kernel advisory routed away from normal advisory issues."],
+            "llm_decision": relevance.get("llm_decision")
+            or "Kernel CVEs use the regular Flatcar kernel update flow.",
+            "reasons": [
+                *relevance.get("reasons", []),
+                "Kernel advisory routed away from normal advisory issues.",
+            ],
             "evidence": relevance.get("evidence", []),
         }
-        return relevance, {
-            "action": "kernel_regular_update_flow",
-            "confidence": "high",
-            "reason": "Kernel CVEs are not tracked as normal Flatcar advisory issues.",
-        }, []
+        return (
+            relevance,
+            {
+                "action": "kernel_regular_update_flow",
+                "confidence": "high",
+                "reason": "Kernel CVEs are not tracked as normal Flatcar advisory issues.",
+            },
+            [],
+        )
 
     if unrelated_weak_sbom_matches:
-        assessment_reason = sbom_match_assessment.get("reason") or "LLM judged the weak SBOM substring matches unrelated to the advisory package."
+        assessment_reason = (
+            sbom_match_assessment.get("reason")
+            or "LLM judged the weak SBOM substring matches unrelated to the advisory package."
+        )
         relevance = {
             **relevance,
             "status": "not_relevant",
             "scope": "not_shipped",
-            "llm_decision": relevance.get("llm_decision") or "Weak SBOM matches are unrelated; no Flatcar package evidence remains.",
-            "reasons": [*relevance.get("reasons", []), "LLM judged weak SBOM substring matches unrelated to the advisory package."],
+            "llm_decision": relevance.get("llm_decision")
+            or "Weak SBOM matches are unrelated; no Flatcar package evidence remains.",
+            "reasons": [
+                *relevance.get("reasons", []),
+                "LLM judged weak SBOM substring matches unrelated to the advisory package.",
+            ],
             "evidence": [*relevance.get("evidence", []), assessment_reason],
         }
         decision = {
@@ -329,7 +407,9 @@ def apply_discovery_guardrails(
         }
 
     if not package_name:
-        manual_reasons.append("LLM extraction did not identify a package or component name.")
+        manual_reasons.append(
+            "LLM extraction did not identify a package or component name."
+        )
     if decision["action"] not in DISCOVERY_ACTIONS:
         manual_reasons.append(f"Invalid discovery action: {decision['action']}")
     if relevance["status"] == "needs_manual_review":
@@ -341,13 +421,28 @@ def apply_discovery_guardrails(
             "reason": "Existing Flatcar issue match found; recommend updating it instead of creating a duplicate.",
         }
     if decision["action"] == "update_existing_issue" and not issue_matches:
-        manual_reasons.append("LLM recommended updating an existing issue but no existing issue match was found.")
-    if decision["action"] in {"create_issue", "update_existing_issue"} and relevance["status"] != "relevant":
-        manual_reasons.append("Issue mutation recommendation requires a relevant Flatcar status.")
-    if decision["action"] == "create_issue" and not (extraction.get("cves") or extraction.get("summary") != "TBD"):
-        manual_reasons.append("Create recommendation lacks CVE IDs or an upstream security issue summary.")
-    if decision["action"] == "create_issue" and not (sbom_matches or relevance.get("evidence")):
-        manual_reasons.append("Create recommendation lacks SBOM match or other explicit Flatcar relevance evidence.")
+        manual_reasons.append(
+            "LLM recommended updating an existing issue but no existing issue match was found."
+        )
+    if (
+        decision["action"] in {"create_issue", "update_existing_issue"}
+        and relevance["status"] != "relevant"
+    ):
+        manual_reasons.append(
+            "Issue mutation recommendation requires a relevant Flatcar status."
+        )
+    if decision["action"] == "create_issue" and not (
+        extraction.get("cves") or extraction.get("summary") != "TBD"
+    ):
+        manual_reasons.append(
+            "Create recommendation lacks CVE IDs or an upstream security issue summary."
+        )
+    if decision["action"] == "create_issue" and not (
+        sbom_matches or relevance.get("evidence")
+    ):
+        manual_reasons.append(
+            "Create recommendation lacks SBOM match or other explicit Flatcar relevance evidence."
+        )
 
     if manual_reasons:
         relevance = {**relevance, "status": "needs_manual_review"}
@@ -360,7 +455,8 @@ def apply_discovery_guardrails(
         decision = {
             "action": "ignore",
             "confidence": decision.get("confidence", "medium"),
-            "reason": decision.get("reason") or "LLM decision found the advisory not relevant to Flatcar tracking rules.",
+            "reason": decision.get("reason")
+            or "LLM decision found the advisory not relevant to Flatcar tracking rules.",
         }
     return relevance, decision, manual_reasons
 
@@ -368,7 +464,10 @@ def apply_discovery_guardrails(
 def _only_weak_sbom_matches(sbom_matches: list[dict[str, Any]]) -> bool:
     if not sbom_matches:
         return True
-    return all(match.get("match_type") in {"unique_substring", "ambiguous_substring"} for match in sbom_matches)
+    return all(
+        match.get("match_type") in {"unique_substring", "ambiguous_substring"}
+        for match in sbom_matches
+    )
 
 
 def min_confidence(left: str | None, right: str | None) -> str:
@@ -379,11 +478,37 @@ def min_confidence(left: str | None, right: str | None) -> str:
 
 
 def validate_discovery_document(document: dict[str, Any]) -> None:
-    _require_root(document, ["schema_version", "workflow", "generated_at", "target_repo", "processing_window", "sources", "model", "records", "errors"])
+    _require_root(
+        document,
+        [
+            "schema_version",
+            "workflow",
+            "generated_at",
+            "target_repo",
+            "processing_window",
+            "sources",
+            "model",
+            "records",
+            "errors",
+        ],
+    )
     if document["workflow"] != "new_vulnerability_discovery":
         raise SchemaValidationError("Invalid discovery workflow name")
     for record in document.get("records", []):
-        _require_root(record, ["record_id", "source", "source_url", "raw_advisory_id", "llm_extraction", "flatcar_relevance", "decision", "manual_review_reasons", "evidence"])
+        _require_root(
+            record,
+            [
+                "record_id",
+                "source",
+                "source_url",
+                "raw_advisory_id",
+                "llm_extraction",
+                "flatcar_relevance",
+                "decision",
+                "manual_review_reasons",
+                "evidence",
+            ],
+        )
         action = record["decision"].get("action")
         if action not in DISCOVERY_ACTIONS:
             raise SchemaValidationError(f"Invalid discovery action {action}")
@@ -394,25 +519,64 @@ def validate_discovery_document(document: dict[str, Any]) -> None:
         if proposed_issue:
             labels = set(proposed_issue.get("labels", []))
             if not REQUIRED_LABELS.issubset(labels):
-                raise SchemaValidationError("Proposed issue is missing required advisory/security labels")
+                raise SchemaValidationError(
+                    "Proposed issue is missing required advisory/security labels"
+                )
             unknown = labels - ALLOWED_LABELS
             if unknown:
-                raise SchemaValidationError(f"Proposed issue contains unsupported labels: {sorted(unknown)}")
+                raise SchemaValidationError(
+                    f"Proposed issue contains unsupported labels: {sorted(unknown)}"
+                )
 
 
 def validate_cleanup_document(document: dict[str, Any]) -> None:
-    _require_root(document, ["schema_version", "workflow", "generated_at", "target_repo", "sbom_url", "issue_query", "records", "errors"])
+    _require_root(
+        document,
+        [
+            "schema_version",
+            "workflow",
+            "generated_at",
+            "target_repo",
+            "sbom_url",
+            "issue_query",
+            "records",
+            "errors",
+        ],
+    )
     if document["workflow"] != "advisory_cleanup_recommendation":
         raise SchemaValidationError("Invalid cleanup workflow name")
     for record in document.get("records", []):
-        _require_root(record, ["issue", "issue_url", "title", "package_from_issue", "labels", "sbom_url", "cves_from_issue", "fixed_version_requirement", "sbom_package_matches", "llm_review", "status", "confidence", "evidence", "recommended_action", "comment_body"])
+        _require_root(
+            record,
+            [
+                "issue",
+                "issue_url",
+                "title",
+                "package_from_issue",
+                "labels",
+                "sbom_url",
+                "cves_from_issue",
+                "fixed_version_requirement",
+                "sbom_package_matches",
+                "llm_review",
+                "status",
+                "confidence",
+                "evidence",
+                "recommended_action",
+                "comment_body",
+            ],
+        )
         if record["status"] not in CLEANUP_STATUSES:
             raise SchemaValidationError(f"Invalid cleanup status {record['status']}")
         if record["recommended_action"] not in CLEANUP_RECOMMENDATIONS:
-            raise SchemaValidationError(f"Invalid cleanup recommendation {record['recommended_action']}")
+            raise SchemaValidationError(
+                f"Invalid cleanup recommendation {record['recommended_action']}"
+            )
 
 
-def cleanup_comment_body(package: str, cves: list[str], action_needed: str | None, match: dict[str, Any]) -> str:
+def cleanup_comment_body(
+    package: str, cves: list[str], action_needed: str | None, match: dict[str, Any]
+) -> str:
     cve_text = ", ".join(cves) if cves else "n/a"
     return (
         "This advisory appears to be remediated in the current Flatcar production SBOM.\n\n"

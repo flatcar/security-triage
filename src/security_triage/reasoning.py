@@ -45,7 +45,9 @@ def build_discovery_evidence_bundle(
 
 def _sbom_match_review(sbom_matches: list[dict[str, Any]]) -> dict[str, Any]:
     weak_match_types = {"unique_substring", "ambiguous_substring"}
-    weak_matches = [match for match in sbom_matches if match.get("match_type") in weak_match_types]
+    weak_matches = [
+        match for match in sbom_matches if match.get("match_type") in weak_match_types
+    ]
     return {
         "requires_llm_judgement": bool(weak_matches),
         "weak_match_count": len(weak_matches),

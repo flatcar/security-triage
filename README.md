@@ -7,18 +7,46 @@ This repository contains a Flatcar-specific advisory assistant for two workflows
 
 It is intentionally conservative. The default mode is read-only, produces machine-readable JSON/YAML, and sends uncertain cases to `needs_manual_review`.
 
+## Requirements
+
+- Python 3.12, 3.13, or 3.14
+- [uv](https://docs.astral.sh/uv/) for dependency and environment management
+- GNU Make (optional, but the `Makefile` is the recommended entry point)
+
+Install `uv` once, for example:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
 ## Install
 
-```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
-```
-
-YAML input/output is optional:
+Set up a development environment (creates `.venv/`, installs the package plus the `dev` dependency group with ruff, mypy, pytest, pytest-cov, and pytest-mock):
 
 ```bash
-.venv/bin/python -m pip install -e '.[dev,yaml]'
+make dev-install
 ```
+
+Or, using `uv` directly:
+
+```bash
+uv sync --group dev
+```
+
+Production-mode install without development tooling:
+
+```bash
+make install
+# or: uv sync
+```
+
+YAML input/output is exposed as the `yaml` optional dependency:
+
+```bash
+uv sync --group dev --extra yaml
+```
+
+Run `make help` to see the full list of targets (`test`, `lint`, `format`, `type-check`, `check`, `fix`, `build`, `clean`, `ci`, `all`).
 
 ## Authentication
 
@@ -51,7 +79,7 @@ Two Foundry endpoint families are supported:
 If you are already logged in locally with Azure CLI and GitHub CLI, refresh `.env` without printing tokens:
 
 ```bash
-.venv/bin/python scripts/local/populate_foundry_env.py
+uv run scripts/local/populate_foundry_env.py
 ```
 
 The Azure access token is short-lived. Re-run the helper when `FOUNDRY_BEARER_TOKEN` expires, or replace it manually in `.env`.
@@ -84,7 +112,7 @@ permissions:
 Discovery dry run:
 
 ```bash
-.venv/bin/python scripts/local/run_discovery_dry_run.py \
+uv run scripts/local/run_discovery_dry_run.py \
   --source-fixture tests/fixtures/discovery_entries.json \
   --issues-fixture tests/fixtures/github_issues.json \
   --debug-log reports/discovery-debug.jsonl \
@@ -94,7 +122,7 @@ Discovery dry run:
 Cleanup dry run:
 
 ```bash
-.venv/bin/python scripts/local/run_cleanup_dry_run.py \
+uv run scripts/local/run_cleanup_dry_run.py \
   --issues-fixture tests/fixtures/github_issues.json \
   --debug-log reports/cleanup-debug.jsonl \
   --output reports/cleanup-dry-run.md
@@ -104,10 +132,12 @@ The wrappers write Markdown to `--output` and JSON beside it. Use the CLI direct
 
 ## CLI
 
+The `security-triage` entry point is installed by `uv sync`. Invoke it via `uv run security-triage ...` or activate the environment first (`source .venv/bin/activate`).
+
 Discovery with fixtures:
 
 ```bash
-security-triage discovery \
+uv run security-triage discovery \
   --source-fixture tests/fixtures/discovery_entries.json \
   --issues-fixture tests/fixtures/github_issues.json \
   --sbom-fixture tests/fixtures/sbom.json \
@@ -119,7 +149,7 @@ security-triage discovery \
 Cleanup with fixtures:
 
 ```bash
-security-triage cleanup \
+uv run security-triage cleanup \
   --issues-fixture tests/fixtures/github_issues.json \
   --sbom-fixture tests/fixtures/sbom.json \
   --output reports/cleanup.json \
@@ -130,7 +160,7 @@ security-triage cleanup \
 Live read-only discovery with Microsoft Foundry:
 
 ```bash
-security-triage discovery \
+uv run security-triage discovery \
   --model foundry \
   --window-days 1 \
   --oss-security-cache-dir reports/.cache/source-downloads \
@@ -145,7 +175,7 @@ security-triage discovery \
 Live read-only cleanup with Microsoft Foundry:
 
 ```bash
-security-triage cleanup \
+uv run security-triage cleanup \
   --model foundry \
   --prompt-cache-dir reports/.cache/prompt-cache \
   --output reports/cleanup.json \
@@ -156,7 +186,7 @@ security-triage cleanup \
 Live read-only discovery with GitHub Models fallback:
 
 ```bash
-security-triage discovery \
+uv run security-triage discovery \
   --model github \
   --oss-security-cache-dir reports/.cache/source-downloads \
   --go-vulndb-cache-dir reports/.cache/source-downloads \
@@ -169,7 +199,7 @@ security-triage discovery \
 Live read-only cleanup with GitHub Models fallback:
 
 ```bash
-security-triage cleanup \
+uv run security-triage cleanup \
   --model github \
   --output reports/cleanup.json \
   --markdown-output reports/cleanup.md \
@@ -222,10 +252,45 @@ Cleanup JSON root fields include:
 
 Every workflow validates its output contract before writing the document.
 
-## Tests
+## Development
+
+Common tasks run through the `Makefile`:
 
 ```bash
-.venv/bin/python -m pytest
+make test         # run pytest with coverage (term, HTML, XML, branch)
+make test-quick   # run pytest without coverage
+make lint         # ruff check src/ tests/
+make format       # ruff format src/ tests/
+make format-check # ruff format --check src/ tests/
+make type-check   # mypy src/ tests/
+make fix          # ruff format + ruff check --fix
+make check        # format-check + lint + type-check + test
+make ci           # alias for check, matches the CI pipeline
+make build        # uv build (wheel + sdist into dist/)
+make clean        # remove build/test artifacts
 ```
 
+Equivalent `uv` invocations if you prefer to skip Make:
+
+```bash
+uv run pytest
+uv run ruff check src/ tests/
+uv run ruff format src/ tests/
+uv run mypy src/ tests/
+uv build
+```
+
+Coverage output lands in `htmlcov/` (HTML), `coverage.xml`, and the terminal report. Coverage is configured in `pyproject.toml`; the CLI-oriented `pytest.ini` mirrors the same options for direct `pytest` invocations.
+
 The tests cover issue parsing, SBOM parsing, package matching, version comparison, severity/scope labels, discovery guardrails, cleanup guardrails, CLI output, GitHub Models and Foundry request shapes, source fetchers, and fixture dry-run behavior.
+
+## Continuous Integration and Releases
+
+GitHub Actions workflows live in `.github/workflows/`:
+
+- `lint.yml`: ruff check, ruff format check, and mypy on push and pull request.
+- `tests.yml`: pytest across Python 3.12, 3.13, and 3.14 on Ubuntu, macOS, and Windows.
+- `install.yml`: builds the wheel and installs it into an isolated `uv venv` on all three OSes and Python versions, then verifies the `security-triage` entry point.
+- `security-triage.yml`: the guarded discovery and cleanup pipeline itself.
+- `release.yml`: semantic-release driven versioning, changelog, and GitHub Releases from `main`. Configuration lives in `release.config.js`.
+- `publish.yml`: PyPI publishing template (disabled by default; uncomment when ready to publish).

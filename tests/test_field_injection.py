@@ -6,9 +6,7 @@ from security_triage.rules import (
     sanitize_single_line,
 )
 
-_EXISTING_BODY = (
-    "Name: openssl\nCVEs: CVE-2026-1\nCVSSs: n/a\nAction Needed: TBD\nSummary: s\n\nrefmap.gentoo: TBD"
-)
+_EXISTING_BODY = "Name: openssl\nCVEs: CVE-2026-1\nCVSSs: n/a\nAction Needed: TBD\nSummary: s\n\nrefmap.gentoo: TBD"
 
 
 def test_sanitize_single_line_collapses_newlines_and_controls():
@@ -63,10 +61,15 @@ def test_render_issue_body_defends_against_injected_scalar():
     # No line may begin with an injected field label; the neutralized text stays
     # inline, so the parser never treats it as a real field.
     field_line_starts = [
-        line for line in body.splitlines() if line.startswith(("Name:", "Action Needed:", "refmap.gentoo:"))
+        line
+        for line in body.splitlines()
+        if line.startswith(("Name:", "Action Needed:", "refmap.gentoo:"))
     ]
     assert sorted(field_line_starts)[0].startswith("Action Needed:")
-    assert len([line for line in body.splitlines() if line.startswith("refmap.gentoo:")]) == 1
+    assert (
+        len([line for line in body.splitlines() if line.startswith("refmap.gentoo:")])
+        == 1
+    )
     parsed = parse_issue_body(body)
     assert parsed.gentoo_ref == "TBD"
     assert parsed.name == "pkg CVEs: CVE-2000-0001"
@@ -78,7 +81,8 @@ def test_append_field_values_blocks_newline_injection():
     updated = append_field_values(_EXISTING_BODY, "refmap.gentoo", [evil])
     assert parse_issue_body(updated).action_needed == "TBD"
     assert not any(
-        line.startswith("Action Needed: update to >= 0.0.1") for line in updated.splitlines()
+        line.startswith("Action Needed: update to >= 0.0.1")
+        for line in updated.splitlines()
     )
 
 

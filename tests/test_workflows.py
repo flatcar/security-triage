@@ -33,20 +33,40 @@ def test_discovery_workflow_fixture_decisions():
     entries = load_source_fixture(str(FIXTURES / "discovery_entries.json"))
     issues = load_issue_fixture(str(FIXTURES / "github_issues.json"))
     sbom = load_sbom_fixture(str(FIXTURES / "sbom.json"))
-    document = DiscoveryWorkflow(HeuristicModelClient(), sbom, issues).run(entries, "2026-04-29T00:00:00Z", "2026-04-30T00:00:00Z")
+    document = DiscoveryWorkflow(HeuristicModelClient(), sbom, issues).run(
+        entries, "2026-04-29T00:00:00Z", "2026-04-30T00:00:00Z"
+    )
 
-    records_by_package = {record["llm_extraction"]["package_name"]: record for record in document["records"]}
+    records_by_package = {
+        record["llm_extraction"]["package_name"]: record
+        for record in document["records"]
+    }
     assert records_by_package["openssl"]["decision"]["action"] == "create_issue"
     assert records_by_package["openssl"]["proposed_issue"]["title"] == "update: openssl"
     assert "security" in records_by_package["openssl"]["proposed_issue"]["labels"]
-    assert records_by_package["rust-openssl"]["decision"]["action"] == "update_existing_issue"
-    assert records_by_package["linux-kernel"]["decision"]["action"] == "kernel_regular_update_flow"
+    assert (
+        records_by_package["rust-openssl"]["decision"]["action"]
+        == "update_existing_issue"
+    )
+    assert (
+        records_by_package["linux-kernel"]["decision"]["action"]
+        == "kernel_regular_update_flow"
+    )
     assert records_by_package["gnome-shell"]["decision"]["action"] == "ignore"
     assert records_by_package["left-pad-plus"]["decision"]["action"] == "ignore"
 
 
 def test_discovery_does_not_route_userspace_advisory_to_kernel_flow_from_content_text():
-    sbom = SBOMIndex([SBOMPackage(name="systemd", version_info="260", spdx_id="SPDXRef-Package-systemd", purls=[])])
+    sbom = SBOMIndex(
+        [
+            SBOMPackage(
+                name="systemd",
+                version_info="260",
+                spdx_id="SPDXRef-Package-systemd",
+                purls=[],
+            )
+        ]
+    )
     entry = SourceEntry(
         source="gentoo",
         source_url="https://bugs.gentoo.org/40001",
@@ -57,7 +77,9 @@ def test_discovery_does_not_route_userspace_advisory_to_kernel_flow_from_content
         updated_at="2026-04-29T00:10:00Z",
     )
 
-    document = DiscoveryWorkflow(HeuristicModelClient(), sbom, []).run([entry], "2026-04-29T00:00:00Z", "2026-04-30T00:00:00Z")
+    document = DiscoveryWorkflow(HeuristicModelClient(), sbom, []).run(
+        [entry], "2026-04-29T00:00:00Z", "2026-04-30T00:00:00Z"
+    )
     record = document["records"][0]
 
     assert record["decision"]["action"] == "create_issue"
@@ -77,7 +99,9 @@ def test_discovery_ignores_advisory_ids_already_present_in_open_issue():
         updated_at="2026-04-29T00:00:00Z",
     )
 
-    document = DiscoveryWorkflow(HeuristicModelClient(), sbom, issues).run([entry], "2026-04-23T00:00:00Z", "2026-04-30T00:00:00Z")
+    document = DiscoveryWorkflow(HeuristicModelClient(), sbom, issues).run(
+        [entry], "2026-04-23T00:00:00Z", "2026-04-30T00:00:00Z"
+    )
     record = document["records"][0]
 
     assert record["decision"]["action"] == "ignore"
@@ -120,21 +144,38 @@ def test_discovery_updates_existing_issue_for_new_bugzilla_comment():
         metadata={"alias": ["CVE-2026-10001", "CVE-2026-10002"], "severity": "normal"},
     )
 
-    document = DiscoveryWorkflow(HeuristicModelClient(), sbom, issues).run([entry], "2026-04-23T00:00:00Z", "2026-04-30T00:00:00Z")
+    document = DiscoveryWorkflow(HeuristicModelClient(), sbom, issues).run(
+        [entry], "2026-04-23T00:00:00Z", "2026-04-30T00:00:00Z"
+    )
     record = document["records"][0]
 
     assert record["decision"]["action"] == "update_existing_issue"
     assert record["proposed_update"]["issue"] == 2109
-    assert record["proposed_update"]["update_reason"] == "Upstream Bugzilla data introduced advisory IDs not present in the existing issue."
-    assert record["proposed_update"]["detected_changes"][0]["kind"] == "new_extracted_cves"
-    assert record["proposed_update"]["detected_changes"][1]["kind"] == "new_bugzilla_aliases"
-    assert record["proposed_update"]["detected_changes"][2]["kind"] == "bugzilla_severity"
-    assert record["proposed_update"]["detected_changes"][3]["kind"] == "new_bugzilla_comment"
+    assert (
+        record["proposed_update"]["update_reason"]
+        == "Upstream Bugzilla data introduced advisory IDs not present in the existing issue."
+    )
+    assert (
+        record["proposed_update"]["detected_changes"][0]["kind"] == "new_extracted_cves"
+    )
+    assert (
+        record["proposed_update"]["detected_changes"][1]["kind"]
+        == "new_bugzilla_aliases"
+    )
+    assert (
+        record["proposed_update"]["detected_changes"][2]["kind"] == "bugzilla_severity"
+    )
+    assert (
+        record["proposed_update"]["detected_changes"][3]["kind"]
+        == "new_bugzilla_comment"
+    )
     assert "Bugzilla comment #1" in record["proposed_update"]["comment_body"]
     markdown = render_discovery_markdown(document)
     assert "### gentoo rust-openssl (2026-04-01T00:00:00Z)" in markdown
     assert f"### {record['record_id']}" not in markdown
-    assert "- Created (updated): 2026-04-01T00:00:00Z (2026-04-29T12:00:00Z)" in markdown
+    assert (
+        "- Created (updated): 2026-04-01T00:00:00Z (2026-04-29T12:00:00Z)" in markdown
+    )
     assert "Proposed additive issue body update" in markdown
     assert "Comment preview" in markdown
     assert "CVE-2026-10002" in record["proposed_update"]["updated_body"]
@@ -165,7 +206,16 @@ def test_discovery_existing_issue_update_preserves_cross_thread_cves_and_refs():
             raw={},
         )
     ]
-    sbom = SBOMIndex([SBOMPackage(name="expat", version_info="2.7.4", spdx_id="SPDXRef-Package-expat", purls=[])])
+    sbom = SBOMIndex(
+        [
+            SBOMPackage(
+                name="expat",
+                version_info="2.7.4",
+                spdx_id="SPDXRef-Package-expat",
+                purls=[],
+            )
+        ]
+    )
     entry = SourceEntry(
         source="gentoo",
         source_url="https://bugs.gentoo.org/973144",
@@ -177,14 +227,18 @@ def test_discovery_existing_issue_update_preserves_cross_thread_cves_and_refs():
         metadata={"alias": ["CVE-2026-41080"], "url": "https://bugs.gentoo.org/973144"},
     )
 
-    document = DiscoveryWorkflow(HeuristicModelClient(), sbom, issues).run([entry], "2026-06-29T00:00:00Z", "2026-06-30T00:00:00Z")
+    document = DiscoveryWorkflow(HeuristicModelClient(), sbom, issues).run(
+        [entry], "2026-06-29T00:00:00Z", "2026-06-30T00:00:00Z"
+    )
     record = document["records"][0]
     updated_body = record["proposed_update"]["updated_body"]
     markdown = render_discovery_markdown(document)
 
     assert record["decision"]["action"] == "update_existing_issue"
     assert updated_body is not None
-    assert "CVE-2026-32776, CVE-2026-32777, CVE-2026-32778, CVE-2026-41080" in updated_body
+    assert (
+        "CVE-2026-32776, CVE-2026-32777, CVE-2026-32778, CVE-2026-41080" in updated_body
+    )
     assert "https://bugs.gentoo.org/971298" in updated_body
     assert "https://bugs.gentoo.org/973144" in updated_body
     assert "CVE-2026-32776: libexpat before 2.7.5" in updated_body
@@ -219,15 +273,24 @@ def test_discovery_treats_unrelated_ambiguous_sbom_matches_as_not_shipped():
         updated_at="2026-04-30T05:08:38Z",
     )
 
-    document = DiscoveryWorkflow(HeuristicModelClient(), sbom, []).run([entry], "2026-04-29T00:00:00Z", "2026-04-30T23:59:59Z")
+    document = DiscoveryWorkflow(HeuristicModelClient(), sbom, []).run(
+        [entry], "2026-04-29T00:00:00Z", "2026-04-30T23:59:59Z"
+    )
     record = document["records"][0]
 
-    assert {match["match_type"] for match in record["sbom_package_matches"]} == {"ambiguous_substring"}
-    assert record["flatcar_relevance"]["sbom_match_assessment"]["status"] == "unrelated_matches"
+    assert {match["match_type"] for match in record["sbom_package_matches"]} == {
+        "ambiguous_substring"
+    }
+    assert (
+        record["flatcar_relevance"]["sbom_match_assessment"]["status"]
+        == "unrelated_matches"
+    )
     assert record["flatcar_relevance"]["scope"] == "not_shipped"
     assert record["decision"]["action"] == "ignore"
     assert "strong not-shipped evidence" in record["decision"]["reason"]
-    assert "SBOM match assessment: unrelated_matches" in render_discovery_markdown(document)
+    assert "SBOM match assessment: unrelated_matches" in render_discovery_markdown(
+        document
+    )
 
 
 def test_cleanup_workflow_fixture_decisions():
@@ -238,7 +301,10 @@ def test_cleanup_workflow_fixture_decisions():
 
     assert records[2088]["status"] == "remediated_in_current_production_sbom"
     assert records[2088]["recommended_action"] == "comment_only"
-    assert "Pipeline recommendation: close as fixed/remediated." in records[2088]["comment_body"]
+    assert (
+        "Pipeline recommendation: close as fixed/remediated."
+        in records[2088]["comment_body"]
+    )
     assert records[1970]["status"] == "not_remediated_in_current_production_sbom"
     assert records[1970]["recommended_action"] == "keep_open"
     assert records[2082]["status"] == "needs_manual_review"
@@ -264,7 +330,13 @@ def test_cleanup_live_markdown_fields_keep_below_version_open():
 """,
         )
     ]
-    sbom = SBOMIndex([SBOMPackage(name="net-misc/socat", version_info="1.8.1.1", spdx_id="SPDXRef-socat")])
+    sbom = SBOMIndex(
+        [
+            SBOMPackage(
+                name="net-misc/socat", version_info="1.8.1.1", spdx_id="SPDXRef-socat"
+            )
+        ]
+    )
 
     document = CleanupWorkflow(HeuristicModelClient(), sbom, issues).run()
     record = document["records"][0]
@@ -294,7 +366,15 @@ def test_cleanup_active_tbd_after_struck_through_stays_manual_review():
 """,
         )
     ]
-    sbom = SBOMIndex([SBOMPackage(name="dev-libs/libxml2", version_info="2.15.3", spdx_id="SPDXRef-libxml2")])
+    sbom = SBOMIndex(
+        [
+            SBOMPackage(
+                name="dev-libs/libxml2",
+                version_info="2.15.3",
+                spdx_id="SPDXRef-libxml2",
+            )
+        ]
+    )
 
     document = CleanupWorkflow(HeuristicModelClient(), sbom, issues).run()
     record = document["records"][0]
@@ -322,7 +402,13 @@ def test_cleanup_multiple_active_fixed_versions_use_highest_requirement():
 """,
         )
     ]
-    sbom = SBOMIndex([SBOMPackage(name="net-misc/rsync", version_info="3.4.3", spdx_id="SPDXRef-rsync")])
+    sbom = SBOMIndex(
+        [
+            SBOMPackage(
+                name="net-misc/rsync", version_info="3.4.3", spdx_id="SPDXRef-rsync"
+            )
+        ]
+    )
 
     document = CleanupWorkflow(HeuristicModelClient(), sbom, issues).run()
     record = document["records"][0]
@@ -350,7 +436,15 @@ def test_cleanup_gentoo_revision_suffix_can_satisfy_requirement():
 """,
         )
     ]
-    sbom = SBOMIndex([SBOMPackage(name="sys-apps/systemd", version_info="260.1-r1", spdx_id="SPDXRef-systemd")])
+    sbom = SBOMIndex(
+        [
+            SBOMPackage(
+                name="sys-apps/systemd",
+                version_info="260.1-r1",
+                spdx_id="SPDXRef-systemd",
+            )
+        ]
+    )
 
     document = CleanupWorkflow(HeuristicModelClient(), sbom, issues).run()
     record = document["records"][0]
@@ -377,7 +471,13 @@ def test_cleanup_or_alternative_branch_remediates_below_highest_requirement():
 """,
         )
     ]
-    sbom = SBOMIndex([SBOMPackage(name="sys-apps/systemd", version_info="259.6", spdx_id="SPDXRef-systemd")])
+    sbom = SBOMIndex(
+        [
+            SBOMPackage(
+                name="sys-apps/systemd", version_info="259.6", spdx_id="SPDXRef-systemd"
+            )
+        ]
+    )
 
     document = CleanupWorkflow(HeuristicModelClient(), sbom, issues).run()
     record = document["records"][0]
@@ -392,7 +492,9 @@ def test_cleanup_can_use_model_to_keep_open_for_ambiguous_package_match():
             return {
                 "decision": "not_remediated_in_current_production_sbom",
                 "confidence": "high",
-                "reasons": ["The relevant package candidate is below the required version."],
+                "reasons": [
+                    "The relevant package candidate is below the required version."
+                ],
             }
 
     issues = [
@@ -414,8 +516,16 @@ def test_cleanup_can_use_model_to_keep_open_for_ambiguous_package_match():
     ]
     sbom = SBOMIndex(
         [
-            SBOMPackage(name="acct-group/docker", version_info="0-r3", spdx_id="SPDXRef-docker-group"),
-            SBOMPackage(name="app-containers/docker", version_info="28.2.2", spdx_id="SPDXRef-docker"),
+            SBOMPackage(
+                name="acct-group/docker",
+                version_info="0-r3",
+                spdx_id="SPDXRef-docker-group",
+            ),
+            SBOMPackage(
+                name="app-containers/docker",
+                version_info="28.2.2",
+                spdx_id="SPDXRef-docker",
+            ),
         ]
     )
 
@@ -432,7 +542,9 @@ def test_cleanup_can_use_model_to_close_for_ambiguous_package_match_with_low_con
             return {
                 "decision": "remediated_in_current_production_sbom",
                 "confidence": "high",
-                "reasons": ["The relevant package candidate satisfies the required version."],
+                "reasons": [
+                    "The relevant package candidate satisfies the required version."
+                ],
             }
 
     issues = [
@@ -454,8 +566,16 @@ def test_cleanup_can_use_model_to_close_for_ambiguous_package_match_with_low_con
     ]
     sbom = SBOMIndex(
         [
-            SBOMPackage(name="acct-group/docker", version_info="0-r3", spdx_id="SPDXRef-docker-group"),
-            SBOMPackage(name="app-containers/docker", version_info="29.3.1", spdx_id="SPDXRef-docker"),
+            SBOMPackage(
+                name="acct-group/docker",
+                version_info="0-r3",
+                spdx_id="SPDXRef-docker-group",
+            ),
+            SBOMPackage(
+                name="app-containers/docker",
+                version_info="29.3.1",
+                spdx_id="SPDXRef-docker",
+            ),
         ]
     )
 

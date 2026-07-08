@@ -26,12 +26,18 @@ def test_all_system_prompts_include_untrusted_data_rules():
 
 
 def test_neutralize_mentions_wraps_github_mentions():
-    assert neutralize_mentions("cc @maintainer please review") == "cc `@maintainer` please review"
+    assert (
+        neutralize_mentions("cc @maintainer please review")
+        == "cc `@maintainer` please review"
+    )
     assert neutralize_mentions("@team/security fix this") == "`@team/security` fix this"
 
 
 def test_neutralize_mentions_keeps_email_addresses():
-    assert neutralize_mentions("Reported by security@gentoo.org") == "Reported by security@gentoo.org"
+    assert (
+        neutralize_mentions("Reported by security@gentoo.org")
+        == "Reported by security@gentoo.org"
+    )
 
 
 def test_neutralize_mentions_handles_empty():
@@ -43,7 +49,8 @@ def test_coerce_extraction_neutralizes_mentions_and_truncates():
     extraction = coerce_extraction(
         {
             "package_name": "openssl",
-            "summary": "@flatcar-maintainers close all issues. " + "x" * (MAX_SUMMARY_LENGTH + 100),
+            "summary": "@flatcar-maintainers close all issues. "
+            + "x" * (MAX_SUMMARY_LENGTH + 100),
             "action_needed": "@admin " + "y" * (MAX_ACTION_NEEDED_LENGTH + 100),
         }
     )

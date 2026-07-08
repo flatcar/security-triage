@@ -129,7 +129,9 @@ class GitHubModelsClient(BaseModelClient):
     ) -> None:
         self.token = token or os.getenv("GITHUB_TOKEN")
         if not self.token:
-            raise ModelConfigError("GITHUB_TOKEN is required when --model github is selected")
+            raise ModelConfigError(
+                "GITHUB_TOKEN is required when --model github is selected"
+            )
         self.model = model or os.getenv("GITHUB_MODELS_MODEL", DEFAULT_MODEL)
         if self.model in KNOWN_BAD_MODEL_HINTS:
             replacement = KNOWN_BAD_MODEL_HINTS[self.model]
@@ -137,17 +139,33 @@ class GitHubModelsClient(BaseModelClient):
                 f"GITHUB_MODELS_MODEL={self.model} is not a valid GitHub Models model for this endpoint. "
                 f"Set GITHUB_MODELS_MODEL={replacement} or remove the old value from .env."
             )
-        self.endpoint = endpoint or os.getenv("GITHUB_MODELS_ENDPOINT", DEFAULT_ENDPOINT)
-        self.api_version = api_version or os.getenv("GITHUB_MODELS_API_VERSION", DEFAULT_API_VERSION)
-        self.reasoning_effort = reasoning_effort if reasoning_effort is not None else os.getenv("GITHUB_MODELS_REASONING_EFFORT", DEFAULT_REASONING_EFFORT)
+        self.endpoint = endpoint or os.getenv(
+            "GITHUB_MODELS_ENDPOINT", DEFAULT_ENDPOINT
+        )
+        self.api_version = api_version or os.getenv(
+            "GITHUB_MODELS_API_VERSION", DEFAULT_API_VERSION
+        )
+        self.reasoning_effort = (
+            reasoning_effort
+            if reasoning_effort is not None
+            else os.getenv("GITHUB_MODELS_REASONING_EFFORT", DEFAULT_REASONING_EFFORT)
+        )
         self.debug_logger = debug_logger or DebugLogger()
         self.progress_logger = progress_logger or NullProgressLogger()
-        self.max_retries = _resolve_int(max_retries, "GITHUB_MODELS_MAX_RETRIES", DEFAULT_MAX_RETRIES, minimum=1)
+        self.max_retries = _resolve_int(
+            max_retries, "GITHUB_MODELS_MAX_RETRIES", DEFAULT_MAX_RETRIES, minimum=1
+        )
         self.backoff_base_seconds = _resolve_float(
-            backoff_base_seconds, "GITHUB_MODELS_BACKOFF_BASE_SECONDS", DEFAULT_BACKOFF_BASE_SECONDS, minimum=0.0
+            backoff_base_seconds,
+            "GITHUB_MODELS_BACKOFF_BASE_SECONDS",
+            DEFAULT_BACKOFF_BASE_SECONDS,
+            minimum=0.0,
         )
         self.backoff_max_seconds = _resolve_float(
-            backoff_max_seconds, "GITHUB_MODELS_BACKOFF_MAX_SECONDS", DEFAULT_BACKOFF_MAX_SECONDS, minimum=0.0
+            backoff_max_seconds,
+            "GITHUB_MODELS_BACKOFF_MAX_SECONDS",
+            DEFAULT_BACKOFF_MAX_SECONDS,
+            minimum=0.0,
         )
         self.prompt_cache = prompt_cache
 
@@ -182,7 +200,11 @@ class GitHubModelsClient(BaseModelClient):
                 "metadata": entry.metadata,
             },
         }
-        return coerce_extraction(self._complete_json("extract_advisory_fields", EXTRACTION_SYSTEM_PROMPT, user))
+        return coerce_extraction(
+            self._complete_json(
+                "extract_advisory_fields", EXTRACTION_SYSTEM_PROMPT, user
+            )
+        )
 
     def decide_relevance(self, evidence_bundle: dict[str, Any]) -> dict[str, Any]:
         user = {
@@ -209,7 +231,9 @@ class GitHubModelsClient(BaseModelClient):
             },
             "evidence_bundle": evidence_bundle,
         }
-        payload = self._complete_json("flatcar_tracking_decision", RELEVANCE_SYSTEM_PROMPT, user)
+        payload = self._complete_json(
+            "flatcar_tracking_decision", RELEVANCE_SYSTEM_PROMPT, user
+        )
         return {
             "flatcar_relevance": coerce_relevance(payload.get("flatcar_relevance")),
             "decision": coerce_discovery_decision(payload.get("decision")),
@@ -236,7 +260,9 @@ class GitHubModelsClient(BaseModelClient):
                 "url": issue.html_url,
             },
         }
-        return self._complete_json("normalize_flatcar_issue", ISSUE_NORMALIZATION_SYSTEM_PROMPT, user)
+        return self._complete_json(
+            "normalize_flatcar_issue", ISSUE_NORMALIZATION_SYSTEM_PROMPT, user
+        )
 
     def review_cleanup(self, evidence_bundle: dict[str, Any]) -> dict[str, Any]:
         user = {
@@ -249,9 +275,13 @@ class GitHubModelsClient(BaseModelClient):
             "sbom_url": FLATCAR_PRODUCTION_SBOM_URL,
             "evidence_bundle": evidence_bundle,
         }
-        return coerce_cleanup_review(self._complete_json("cleanup_review", CLEANUP_SYSTEM_PROMPT, user))
+        return coerce_cleanup_review(
+            self._complete_json("cleanup_review", CLEANUP_SYSTEM_PROMPT, user)
+        )
 
-    def _complete_json(self, task: str, system_prompt: str, user_payload: dict[str, Any]) -> dict[str, Any]:
+    def _complete_json(
+        self, task: str, system_prompt: str, user_payload: dict[str, Any]
+    ) -> dict[str, Any]:
         request_payload: dict[str, Any] = {
             "model": self.model,
             "messages": [
@@ -263,7 +293,13 @@ class GitHubModelsClient(BaseModelClient):
         }
         if self.reasoning_effort:
             request_payload["reasoning_effort"] = self.reasoning_effort
-        self.debug_logger.log("model_request", task=task, endpoint=self.endpoint, model=self.model, payload=request_payload)
+        self.debug_logger.log(
+            "model_request",
+            task=task,
+            endpoint=self.endpoint,
+            model=self.model,
+            payload=request_payload,
+        )
         cache_key: str | None = None
         if self.prompt_cache is not None:
             cache_key = self.prompt_cache.key(
@@ -275,8 +311,12 @@ class GitHubModelsClient(BaseModelClient):
             )
             cached = self.prompt_cache.get(cache_key)
             if cached is not None:
-                self.debug_logger.log("model_cache_hit", task=task, key=cache_key, model=self.model)
-                self.progress_logger.info(f"Prompt cache hit for {task} (model={self.model})")
+                self.debug_logger.log(
+                    "model_cache_hit", task=task, key=cache_key, model=self.model
+                )
+                self.progress_logger.info(
+                    f"Prompt cache hit for {task} (model={self.model})"
+                )
                 return cached
         request = urllib.request.Request(
             self.endpoint,
@@ -301,13 +341,23 @@ class GitHubModelsClient(BaseModelClient):
                     response_payload = json.loads(response.read().decode("utf-8"))
                 content = _message_content(response_payload)
                 parsed = _parse_json_content(content)
-                self.debug_logger.log("model_response", task=task, attempt=attempt, model=self.model, parsed=parsed)
-                self.progress_logger.info(f"GitHub Models completed {task} (model={self.model})")
+                self.debug_logger.log(
+                    "model_response",
+                    task=task,
+                    attempt=attempt,
+                    model=self.model,
+                    parsed=parsed,
+                )
+                self.progress_logger.info(
+                    f"GitHub Models completed {task} (model={self.model})"
+                )
                 if self.prompt_cache is not None and cache_key is not None:
                     self.prompt_cache.put(cache_key, parsed, task=task)
                 return parsed
             except urllib.error.HTTPError as exc:
-                error_message = _http_error_message(exc, self.endpoint, self.model, "GitHub Models")
+                error_message = _http_error_message(
+                    exc, self.endpoint, self.model, "GitHub Models"
+                )
                 last_error = ModelResponseError(error_message)
                 retry_after = _retry_after_seconds(exc)
                 retryable = exc.code in RETRYABLE_STATUS_CODES
@@ -328,9 +378,20 @@ class GitHubModelsClient(BaseModelClient):
                     break
                 self._sleep_before_retry(task, attempt, retry_after)
                 continue
-            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ModelResponseError) as exc:
+            except (
+                urllib.error.URLError,
+                TimeoutError,
+                json.JSONDecodeError,
+                ModelResponseError,
+            ) as exc:
                 last_error = exc
-                self.debug_logger.log("model_error", task=task, attempt=attempt, model=self.model, error=str(exc))
+                self.debug_logger.log(
+                    "model_error",
+                    task=task,
+                    attempt=attempt,
+                    model=self.model,
+                    error=str(exc),
+                )
                 self.progress_logger.info(
                     f"GitHub Models error for {task} (model={self.model}) on attempt {attempt}/{total_attempts}: {exc}"
                 )
@@ -338,15 +399,27 @@ class GitHubModelsClient(BaseModelClient):
                     break
                 self._sleep_before_retry(task, attempt, None)
                 continue
-        raise ModelResponseError(f"GitHub Models request failed for {task}: {last_error}")
+        raise ModelResponseError(
+            f"GitHub Models request failed for {task}: {last_error}"
+        )
 
-    def _sleep_before_retry(self, task: str, attempt: int, retry_after: float | None) -> None:
+    def _sleep_before_retry(
+        self, task: str, attempt: int, retry_after: float | None
+    ) -> None:
         if retry_after is not None and retry_after > 0:
-            delay = min(retry_after, self.backoff_max_seconds) if self.backoff_max_seconds > 0 else retry_after
+            delay = (
+                min(retry_after, self.backoff_max_seconds)
+                if self.backoff_max_seconds > 0
+                else retry_after
+            )
             reason = "Retry-After"
         else:
             exp = self.backoff_base_seconds * (2 ** (attempt - 1))
-            capped = min(exp, self.backoff_max_seconds) if self.backoff_max_seconds > 0 else exp
+            capped = (
+                min(exp, self.backoff_max_seconds)
+                if self.backoff_max_seconds > 0
+                else exp
+            )
             jitter = random.uniform(0, max(capped * 0.25, 0.0))
             delay = capped + jitter
             reason = "exponential backoff"
@@ -355,7 +428,9 @@ class GitHubModelsClient(BaseModelClient):
         self.progress_logger.info(
             f"Backing off {delay:.2f}s before retry of {task} (reason: {reason})"
         )
-        self.debug_logger.log("model_retry_sleep", task=task, attempt=attempt, delay=delay, reason=reason)
+        self.debug_logger.log(
+            "model_retry_sleep", task=task, attempt=attempt, delay=delay, reason=reason
+        )
         time.sleep(delay)
 
 
@@ -379,26 +454,54 @@ class FoundryModelsClient(GitHubModelsClient):
         self.bearer_token = bearer_token or os.getenv("FOUNDRY_BEARER_TOKEN")
         self.api_key = api_key or os.getenv("FOUNDRY_API_KEY")
         if not self.bearer_token and not self.api_key:
-            raise ModelConfigError("FOUNDRY_BEARER_TOKEN or FOUNDRY_API_KEY is required when --model foundry is selected")
-        self.endpoint_base = (endpoint or os.getenv("FOUNDRY_ENDPOINT") or "").rstrip("/")
+            raise ModelConfigError(
+                "FOUNDRY_BEARER_TOKEN or FOUNDRY_API_KEY is required when --model foundry is selected"
+            )
+        self.endpoint_base = (endpoint or os.getenv("FOUNDRY_ENDPOINT") or "").rstrip(
+            "/"
+        )
         if not self.endpoint_base:
-            raise ModelConfigError("FOUNDRY_ENDPOINT is required when --model foundry is selected")
-        self.deployment = deployment or os.getenv("FOUNDRY_DEPLOYMENT") or DEFAULT_FOUNDRY_DEPLOYMENT
+            raise ModelConfigError(
+                "FOUNDRY_ENDPOINT is required when --model foundry is selected"
+            )
+        self.deployment = (
+            deployment or os.getenv("FOUNDRY_DEPLOYMENT") or DEFAULT_FOUNDRY_DEPLOYMENT
+        )
         if not self.deployment:
-            raise ModelConfigError("FOUNDRY_DEPLOYMENT must not be empty when --model foundry is selected")
-        configured_api_version = api_version or os.getenv("FOUNDRY_API_VERSION") or _default_foundry_api_version(self.endpoint_base)
-        self.api_version = _normalize_foundry_api_version(self.endpoint_base, configured_api_version)
+            raise ModelConfigError(
+                "FOUNDRY_DEPLOYMENT must not be empty when --model foundry is selected"
+            )
+        configured_api_version = (
+            api_version
+            or os.getenv("FOUNDRY_API_VERSION")
+            or _default_foundry_api_version(self.endpoint_base)
+        )
+        self.api_version = _normalize_foundry_api_version(
+            self.endpoint_base, configured_api_version
+        )
         self.model = self.deployment
-        self.endpoint_family = _foundry_endpoint_family(self.endpoint_base, self.api_version)
-        self.endpoint = _foundry_chat_completions_endpoint(self.endpoint_base, self.deployment, self.api_version)
+        self.endpoint_family = _foundry_endpoint_family(
+            self.endpoint_base, self.api_version
+        )
+        self.endpoint = _foundry_chat_completions_endpoint(
+            self.endpoint_base, self.deployment, self.api_version
+        )
         self.debug_logger = debug_logger or DebugLogger()
         self.progress_logger = progress_logger or NullProgressLogger()
-        self.max_retries = _resolve_int(max_retries, "FOUNDRY_MAX_RETRIES", DEFAULT_MAX_RETRIES, minimum=1)
+        self.max_retries = _resolve_int(
+            max_retries, "FOUNDRY_MAX_RETRIES", DEFAULT_MAX_RETRIES, minimum=1
+        )
         self.backoff_base_seconds = _resolve_float(
-            backoff_base_seconds, "FOUNDRY_BACKOFF_BASE_SECONDS", DEFAULT_BACKOFF_BASE_SECONDS, minimum=0.0
+            backoff_base_seconds,
+            "FOUNDRY_BACKOFF_BASE_SECONDS",
+            DEFAULT_BACKOFF_BASE_SECONDS,
+            minimum=0.0,
         )
         self.backoff_max_seconds = _resolve_float(
-            backoff_max_seconds, "FOUNDRY_BACKOFF_MAX_SECONDS", DEFAULT_BACKOFF_MAX_SECONDS, minimum=0.0
+            backoff_max_seconds,
+            "FOUNDRY_BACKOFF_MAX_SECONDS",
+            DEFAULT_BACKOFF_MAX_SECONDS,
+            minimum=0.0,
         )
         self.prompt_cache = prompt_cache
 
@@ -409,7 +512,9 @@ class FoundryModelsClient(GitHubModelsClient):
         metadata["endpoint_family"] = self.endpoint_family
         return metadata
 
-    def _complete_json(self, task: str, system_prompt: str, user_payload: dict[str, Any]) -> dict[str, Any]:
+    def _complete_json(
+        self, task: str, system_prompt: str, user_payload: dict[str, Any]
+    ) -> dict[str, Any]:
         request_payload: dict[str, Any] = {
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -419,7 +524,13 @@ class FoundryModelsClient(GitHubModelsClient):
         }
         if self.endpoint_family == FOUNDRY_ENDPOINT_FAMILY_V1:
             request_payload["model"] = self.deployment
-        self.debug_logger.log("model_request", task=task, endpoint=self.endpoint, model=self.model, payload=request_payload)
+        self.debug_logger.log(
+            "model_request",
+            task=task,
+            endpoint=self.endpoint,
+            model=self.model,
+            payload=request_payload,
+        )
         cache_key: str | None = None
         if self.prompt_cache is not None:
             cache_key = self.prompt_cache.key(
@@ -431,8 +542,12 @@ class FoundryModelsClient(GitHubModelsClient):
             )
             cached = self.prompt_cache.get(cache_key)
             if cached is not None:
-                self.debug_logger.log("model_cache_hit", task=task, key=cache_key, model=self.model)
-                self.progress_logger.info(f"Prompt cache hit for {task} (deployment={self.deployment})")
+                self.debug_logger.log(
+                    "model_cache_hit", task=task, key=cache_key, model=self.model
+                )
+                self.progress_logger.info(
+                    f"Prompt cache hit for {task} (deployment={self.deployment})"
+                )
                 return cached
         headers = {
             "Accept": "application/json",
@@ -460,13 +575,23 @@ class FoundryModelsClient(GitHubModelsClient):
                     response_payload = json.loads(response.read().decode("utf-8"))
                 content = _message_content(response_payload)
                 parsed = _parse_json_content(content)
-                self.debug_logger.log("model_response", task=task, attempt=attempt, model=self.model, parsed=parsed)
-                self.progress_logger.info(f"Microsoft Foundry completed {task} (deployment={self.deployment})")
+                self.debug_logger.log(
+                    "model_response",
+                    task=task,
+                    attempt=attempt,
+                    model=self.model,
+                    parsed=parsed,
+                )
+                self.progress_logger.info(
+                    f"Microsoft Foundry completed {task} (deployment={self.deployment})"
+                )
                 if self.prompt_cache is not None and cache_key is not None:
                     self.prompt_cache.put(cache_key, parsed, task=task)
                 return parsed
             except urllib.error.HTTPError as exc:
-                error_message = _http_error_message(exc, self.endpoint, self.model, "Microsoft Foundry")
+                error_message = _http_error_message(
+                    exc, self.endpoint, self.model, "Microsoft Foundry"
+                )
                 last_error = ModelResponseError(error_message)
                 retry_after = _retry_after_seconds(exc)
                 retryable = exc.code in RETRYABLE_STATUS_CODES
@@ -487,9 +612,20 @@ class FoundryModelsClient(GitHubModelsClient):
                     break
                 self._sleep_before_retry(task, attempt, retry_after)
                 continue
-            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ModelResponseError) as exc:
+            except (
+                urllib.error.URLError,
+                TimeoutError,
+                json.JSONDecodeError,
+                ModelResponseError,
+            ) as exc:
                 last_error = exc
-                self.debug_logger.log("model_error", task=task, attempt=attempt, model=self.model, error=str(exc))
+                self.debug_logger.log(
+                    "model_error",
+                    task=task,
+                    attempt=attempt,
+                    model=self.model,
+                    error=str(exc),
+                )
                 self.progress_logger.info(
                     f"Microsoft Foundry error for {task} (deployment={self.deployment}) on attempt {attempt}/{total_attempts}: {exc}"
                 )
@@ -497,7 +633,9 @@ class FoundryModelsClient(GitHubModelsClient):
                     break
                 self._sleep_before_retry(task, attempt, None)
                 continue
-        raise ModelResponseError(f"Microsoft Foundry request failed for {task}: {last_error}")
+        raise ModelResponseError(
+            f"Microsoft Foundry request failed for {task}: {last_error}"
+        )
 
 
 class RoutingModelClient(BaseModelClient):
@@ -547,7 +685,9 @@ class FixtureModelClient(BaseModelClient):
     model = "fixture"
     endpoint = "fixture"
 
-    def __init__(self, fixture_path: str, fallback: BaseModelClient | None = None) -> None:
+    def __init__(
+        self, fixture_path: str, fallback: BaseModelClient | None = None
+    ) -> None:
         self.responses = load_structured_file(fixture_path) or {}
         self.fallback = fallback or HeuristicModelClient()
 
@@ -558,7 +698,9 @@ class FixtureModelClient(BaseModelClient):
         return coerce_extraction(response)
 
     def decide_relevance(self, evidence_bundle: dict[str, Any]) -> dict[str, Any]:
-        record_id = evidence_bundle.get("record_id") or evidence_bundle.get("source_entry", {}).get("entry_id")
+        record_id = evidence_bundle.get("record_id") or evidence_bundle.get(
+            "source_entry", {}
+        ).get("entry_id")
         response = (self.responses.get("relevance", {}) or {}).get(record_id)
         if response is None:
             return self.fallback.decide_relevance(evidence_bundle)
@@ -568,14 +710,18 @@ class FixtureModelClient(BaseModelClient):
         }
 
     def normalize_issue(self, issue: Issue) -> dict[str, Any]:
-        response = (self.responses.get("issue_normalizations", {}) or {}).get(str(issue.number))
+        response = (self.responses.get("issue_normalizations", {}) or {}).get(
+            str(issue.number)
+        )
         if response is None:
             return self.fallback.normalize_issue(issue)
         return response
 
     def review_cleanup(self, evidence_bundle: dict[str, Any]) -> dict[str, Any]:
         issue_number = evidence_bundle.get("issue", {}).get("number")
-        response = (self.responses.get("cleanup_reviews", {}) or {}).get(str(issue_number))
+        response = (self.responses.get("cleanup_reviews", {}) or {}).get(
+            str(issue_number)
+        )
         if response is None:
             return self.fallback.review_cleanup(evidence_bundle)
         return coerce_cleanup_review(response)
@@ -598,10 +744,18 @@ class HeuristicModelClient(BaseModelClient):
         cves = extract_cves(text)
         cvss_scores = parse_cvss_scores(_extract_cvss_context(text))
         fixed_versions = _extract_fixed_versions(text)
-        gentoo_ref = entry.source_url if entry.source == "gentoo" else _extract_gentoo_ref(text)
+        gentoo_ref = (
+            entry.source_url if entry.source == "gentoo" else _extract_gentoo_ref(text)
+        )
         summary = _summarize_text(text)
         scope_assessment = _scope_assessment(text)
-        confidence = "high" if package_name and (cves or fixed_versions) else "medium" if package_name else "low"
+        confidence = (
+            "high"
+            if package_name and (cves or fixed_versions)
+            else "medium"
+            if package_name
+            else "low"
+        )
         return coerce_extraction(
             {
                 "package_name": package_name,
@@ -609,7 +763,9 @@ class HeuristicModelClient(BaseModelClient):
                 "cvss_scores": cvss_scores,
                 "affected_versions": _extract_affected_versions(text),
                 "fixed_versions": fixed_versions,
-                "action_needed": f"update to >= {fixed_versions[0]}" if fixed_versions else "TBD",
+                "action_needed": f"update to >= {fixed_versions[0]}"
+                if fixed_versions
+                else "TBD",
                 "summary": summary,
                 "gentoo_ref": gentoo_ref or "TBD",
                 "scope_assessment": scope_assessment,
@@ -644,7 +800,9 @@ class HeuristicModelClient(BaseModelClient):
                 "not_relevant",
                 "not_shipped",
                 "Source appears to describe a desktop or unrelated application ecosystem package.",
-                ["Flatcar tracking rules exclude desktop and unrelated app ecosystem issues."],
+                [
+                    "Flatcar tracking rules exclude desktop and unrelated app ecosystem issues."
+                ],
                 [],
                 "ignore",
                 "medium",
@@ -665,7 +823,9 @@ class HeuristicModelClient(BaseModelClient):
                 "relevant",
                 scope,
                 "An existing Flatcar advisory/update issue already matches this package or CVE.",
-                ["Existing issue match indicates Flatcar maintainers are already tracking this package/update."],
+                [
+                    "Existing issue match indicates Flatcar maintainers are already tracking this package/update."
+                ],
                 [f"Existing issue matches: {len(issue_matches)}"],
                 "update_existing_issue",
                 "medium",
@@ -679,7 +839,9 @@ class HeuristicModelClient(BaseModelClient):
                 "not_shipped",
                 "The only SBOM candidates are weak substring matches that are unrelated to the advisory package.",
                 [sbom_match_assessment["reason"]],
-                [f"Unrelated SBOM candidates: {', '.join(sbom_match_assessment['unrelated_matches'])}"],
+                [
+                    f"Unrelated SBOM candidates: {', '.join(sbom_match_assessment['unrelated_matches'])}"
+                ],
                 "ignore",
                 "medium",
                 "Weak SBOM matches were judged unrelated, so they are evidence that the advisory package is not shipped.",
@@ -694,7 +856,10 @@ class HeuristicModelClient(BaseModelClient):
                 scope,
                 "Flatcar relevance is supported by SBOM or explicit scope evidence.",
                 ["Package has Flatcar evidence."],
-                [f"SBOM matches: {len(sbom_matches)}", f"Scope assessment: {scope_assessment or 'unknown'}"],
+                [
+                    f"SBOM matches: {len(sbom_matches)}",
+                    f"Scope assessment: {scope_assessment or 'unknown'}",
+                ],
                 action,
                 "medium",
                 "Recommend tracking because evidence indicates Flatcar relevance.",
@@ -725,23 +890,45 @@ class HeuristicModelClient(BaseModelClient):
         return data
 
     def review_cleanup(self, evidence_bundle: dict[str, Any]) -> dict[str, Any]:
-        preliminary_status = evidence_bundle.get("preliminary_status") or "needs_manual_review"
+        preliminary_status = (
+            evidence_bundle.get("preliminary_status") or "needs_manual_review"
+        )
         reasons = list(evidence_bundle.get("preliminary_reasons") or [])
         if preliminary_status == "remediated_in_current_production_sbom":
-            reasons.append("Deterministic checks found exact SBOM match and simple version at or above requirement.")
-            return coerce_cleanup_review({"decision": preliminary_status, "confidence": "high", "reasons": reasons})
+            reasons.append(
+                "Deterministic checks found exact SBOM match and simple version at or above requirement."
+            )
+            return coerce_cleanup_review(
+                {
+                    "decision": preliminary_status,
+                    "confidence": "high",
+                    "reasons": reasons,
+                }
+            )
         if preliminary_status == "not_remediated_in_current_production_sbom":
-            reasons.append("Deterministic checks found exact SBOM match below required version.")
-            return coerce_cleanup_review({"decision": preliminary_status, "confidence": "high", "reasons": reasons})
+            reasons.append(
+                "Deterministic checks found exact SBOM match below required version."
+            )
+            return coerce_cleanup_review(
+                {
+                    "decision": preliminary_status,
+                    "confidence": "high",
+                    "reasons": reasons,
+                }
+            )
         reasons.append("Cleanup criteria are not all satisfied; prefer manual review.")
-        return coerce_cleanup_review({"decision": "needs_manual_review", "confidence": "low", "reasons": reasons})
+        return coerce_cleanup_review(
+            {"decision": "needs_manual_review", "confidence": "low", "reasons": reasons}
+        )
 
 
 def _message_content(response_payload: dict[str, Any]) -> str:
     try:
         message = response_payload["choices"][0]["message"]
     except (KeyError, IndexError, TypeError) as exc:
-        raise ModelResponseError("Model response did not contain choices[0].message") from exc
+        raise ModelResponseError(
+            "Model response did not contain choices[0].message"
+        ) from exc
     content = message.get("content")
     if isinstance(content, str):
         return content
@@ -754,11 +941,16 @@ def _message_content(response_payload: dict[str, Any]) -> str:
     raise ModelResponseError("Model response message content was empty or unsupported")
 
 
-def _http_error_message(exc: urllib.error.HTTPError, endpoint: str, model: str, provider_label: str) -> str:
+def _http_error_message(
+    exc: urllib.error.HTTPError, endpoint: str, model: str, provider_label: str
+) -> str:
     body = exc.read().decode("utf-8", errors="replace")
     body_excerpt = body[:1000] if body else "<empty response body>"
     hint = ""
-    if provider_label == "Microsoft Foundry" and "api version not supported" in body.lower():
+    if (
+        provider_label == "Microsoft Foundry"
+        and "api version not supported" in body.lower()
+    ):
         hint = (
             " Hint: Foundry project endpoints use /openai/v1 and do not accept dated api-version values; "
             "legacy deployment endpoints require an Azure OpenAI API version supported by that resource."
@@ -766,8 +958,13 @@ def _http_error_message(exc: urllib.error.HTTPError, endpoint: str, model: str, 
     return f"HTTP {exc.code} from {provider_label} endpoint {endpoint} for model {model}: {body_excerpt}{hint}"
 
 
-def _foundry_chat_completions_endpoint(endpoint_base: str, deployment: str, api_version: str) -> str:
-    if _foundry_endpoint_family(endpoint_base, api_version) == FOUNDRY_ENDPOINT_FAMILY_V1:
+def _foundry_chat_completions_endpoint(
+    endpoint_base: str, deployment: str, api_version: str
+) -> str:
+    if (
+        _foundry_endpoint_family(endpoint_base, api_version)
+        == FOUNDRY_ENDPOINT_FAMILY_V1
+    ):
         return _foundry_v1_chat_completions_endpoint(endpoint_base, api_version)
     deployment_id = urllib.parse.quote(deployment, safe="")
     version = urllib.parse.quote(api_version, safe="")
@@ -783,15 +980,22 @@ def _default_foundry_api_version(endpoint_base: str) -> str:
 def _normalize_foundry_api_version(endpoint_base: str, api_version: str) -> str:
     version = api_version.strip()
     if not version:
-        raise ModelConfigError("FOUNDRY_API_VERSION must not be empty when --model foundry is selected")
-    if _foundry_endpoint_path_uses_v1(endpoint_base) and version.lower() not in FOUNDRY_V1_API_VERSION_VALUES:
+        raise ModelConfigError(
+            "FOUNDRY_API_VERSION must not be empty when --model foundry is selected"
+        )
+    if (
+        _foundry_endpoint_path_uses_v1(endpoint_base)
+        and version.lower() not in FOUNDRY_V1_API_VERSION_VALUES
+    ):
         return FOUNDRY_DEFAULT_V1_API_VERSION
     return version
 
 
 def _foundry_endpoint_family(endpoint_base: str, api_version: str) -> str:
     version = (api_version or "").strip().lower()
-    if version in FOUNDRY_V1_API_VERSION_VALUES or _foundry_endpoint_path_uses_v1(endpoint_base):
+    if version in FOUNDRY_V1_API_VERSION_VALUES or _foundry_endpoint_path_uses_v1(
+        endpoint_base
+    ):
         return FOUNDRY_ENDPOINT_FAMILY_V1
     return FOUNDRY_ENDPOINT_FAMILY_LEGACY
 
@@ -840,7 +1044,9 @@ def _retry_after_seconds(exc: urllib.error.HTTPError) -> float | None:
     return None
 
 
-def _resolve_int(explicit: int | None, env_var: str, default: int, *, minimum: int) -> int:
+def _resolve_int(
+    explicit: int | None, env_var: str, default: int, *, minimum: int
+) -> int:
     if explicit is not None:
         value = explicit
     else:
@@ -850,13 +1056,17 @@ def _resolve_int(explicit: int | None, env_var: str, default: int, *, minimum: i
         try:
             value = int(raw)
         except ValueError as exc:
-            raise ModelConfigError(f"{env_var} must be an integer, got {raw!r}") from exc
+            raise ModelConfigError(
+                f"{env_var} must be an integer, got {raw!r}"
+            ) from exc
     if value < minimum:
         raise ModelConfigError(f"{env_var} must be >= {minimum}, got {value}")
     return value
 
 
-def _resolve_float(explicit: float | None, env_var: str, default: float, *, minimum: float) -> float:
+def _resolve_float(
+    explicit: float | None, env_var: str, default: float, *, minimum: float
+) -> float:
     if explicit is not None:
         value = explicit
     else:
@@ -911,7 +1121,9 @@ def _extract_package_name(text: str, title: str) -> str:
             return match.group(1).strip()
     title_words = [word.strip(" :,;()[]") for word in title.split()]
     for word in title_words:
-        if re.match(r"^[A-Za-z][A-Za-z0-9_.+/-]{2,}$", word) and not word.upper().startswith("CVE-"):
+        if re.match(
+            r"^[A-Za-z][A-Za-z0-9_.+/-]{2,}$", word
+        ) and not word.upper().startswith("CVE-"):
             return word
     return ""
 
@@ -933,7 +1145,9 @@ def _extract_fixed_versions(text: str) -> list[str]:
 
 def _extract_affected_versions(text: str) -> list[str]:
     versions: list[str] = []
-    for match in re.findall(r"affected(?:\s+versions?)?:\s*([^\n]+)", text, re.IGNORECASE):
+    for match in re.findall(
+        r"affected(?:\s+versions?)?:\s*([^\n]+)", text, re.IGNORECASE
+    ):
         value = match.strip()
         if value not in versions:
             versions.append(value)
@@ -965,7 +1179,11 @@ def _scope_assessment(text: str) -> str:
         return "sdk_only"
     if "sysext" in lowered or "system extension" in lowered:
         return "sysext"
-    if not negative_flatcar_evidence and ("production" in lowered or "stable image" in lowered or "flatcar ships" in lowered):
+    if not negative_flatcar_evidence and (
+        "production" in lowered
+        or "stable image" in lowered
+        or "flatcar ships" in lowered
+    ):
         return "production"
     if "build-only" in lowered or "build only" in lowered:
         return "build_only"
@@ -993,9 +1211,15 @@ def _looks_desktop_or_unrelated(text: str) -> bool:
         ]
     )
     has_flatcar_evidence = not negative_flatcar_evidence and (
-        "flatcar ships" in lowered or "production" in lowered or "sysext" in lowered or "sdk" in lowered
+        "flatcar ships" in lowered
+        or "production" in lowered
+        or "sysext" in lowered
+        or "sdk" in lowered
     )
-    return any(marker in lowered for marker in desktop_markers) or (any(marker in lowered for marker in ecosystem_markers) and not has_flatcar_evidence)
+    return any(marker in lowered for marker in desktop_markers) or (
+        any(marker in lowered for marker in ecosystem_markers)
+        and not has_flatcar_evidence
+    )
 
 
 def _decision_pair(
@@ -1020,18 +1244,44 @@ def _decision_pair(
                 "sbom_match_assessment": sbom_match_assessment,
             }
         ),
-        "decision": coerce_discovery_decision({"action": action, "confidence": coerce_confidence(confidence), "reason": reason}),
+        "decision": coerce_discovery_decision(
+            {
+                "action": action,
+                "confidence": coerce_confidence(confidence),
+                "reason": reason,
+            }
+        ),
     }
 
 
-def _assess_sbom_matches(package_name: str, sbom_matches: list[dict[str, Any]]) -> dict[str, Any]:
+def _assess_sbom_matches(
+    package_name: str, sbom_matches: list[dict[str, Any]]
+) -> dict[str, Any]:
     if not sbom_matches:
-        return {"status": "no_matches", "reason": "No Flatcar production SBOM package candidates were found.", "related_matches": [], "unrelated_matches": []}
-    exact_matches = [match for match in sbom_matches if match.get("match_type") in {"exact_name", "exact_purl"}]
+        return {
+            "status": "no_matches",
+            "reason": "No Flatcar production SBOM package candidates were found.",
+            "related_matches": [],
+            "unrelated_matches": [],
+        }
+    exact_matches = [
+        match
+        for match in sbom_matches
+        if match.get("match_type") in {"exact_name", "exact_purl"}
+    ]
     if exact_matches:
         names = _match_names(exact_matches)
-        return {"status": "confirmed_match", "reason": "At least one SBOM package matched by exact name or exact purl package name.", "related_matches": names, "unrelated_matches": []}
-    weak_matches = [match for match in sbom_matches if match.get("match_type") in {"unique_substring", "ambiguous_substring"}]
+        return {
+            "status": "confirmed_match",
+            "reason": "At least one SBOM package matched by exact name or exact purl package name.",
+            "related_matches": names,
+            "unrelated_matches": [],
+        }
+    weak_matches = [
+        match
+        for match in sbom_matches
+        if match.get("match_type") in {"unique_substring", "ambiguous_substring"}
+    ]
     if len(weak_matches) == len(sbom_matches):
         query_tokens = _package_tokens(package_name)
         unrelated = []
@@ -1044,11 +1294,31 @@ def _assess_sbom_matches(package_name: str, sbom_matches: list[dict[str, Any]]) 
             else:
                 unrelated.append(name)
         if related and not unrelated:
-            return {"status": "plausible_match", "reason": "All weak SBOM candidates share meaningful package tokens with the advisory package.", "related_matches": _dedupe_strings(related), "unrelated_matches": []}
+            return {
+                "status": "plausible_match",
+                "reason": "All weak SBOM candidates share meaningful package tokens with the advisory package.",
+                "related_matches": _dedupe_strings(related),
+                "unrelated_matches": [],
+            }
         if unrelated and not related:
-            return {"status": "unrelated_matches", "reason": "All SBOM candidates are weak substring matches without meaningful package-token overlap with the advisory package.", "related_matches": [], "unrelated_matches": _dedupe_strings(unrelated)}
-        return {"status": "needs_manual_review", "reason": "Weak SBOM candidates are mixed; some appear related and some unrelated.", "related_matches": _dedupe_strings(related), "unrelated_matches": _dedupe_strings(unrelated)}
-    return {"status": "needs_manual_review", "reason": "SBOM candidate match types are mixed or unsupported.", "related_matches": _match_names(sbom_matches), "unrelated_matches": []}
+            return {
+                "status": "unrelated_matches",
+                "reason": "All SBOM candidates are weak substring matches without meaningful package-token overlap with the advisory package.",
+                "related_matches": [],
+                "unrelated_matches": _dedupe_strings(unrelated),
+            }
+        return {
+            "status": "needs_manual_review",
+            "reason": "Weak SBOM candidates are mixed; some appear related and some unrelated.",
+            "related_matches": _dedupe_strings(related),
+            "unrelated_matches": _dedupe_strings(unrelated),
+        }
+    return {
+        "status": "needs_manual_review",
+        "reason": "SBOM candidate match types are mixed or unsupported.",
+        "related_matches": _match_names(sbom_matches),
+        "unrelated_matches": [],
+    }
 
 
 def _match_names(matches: list[dict[str, Any]]) -> list[str]:
@@ -1056,8 +1326,17 @@ def _match_names(matches: list[dict[str, Any]]) -> list[str]:
 
 
 def _package_tokens(value: str) -> set[str]:
-    tokens = {token for token in re.split(r"[^a-z0-9]+", normalize_name(value)) if len(token) >= 3}
-    return {token for token in tokens if token not in {"dev", "lib", "libs", "perl", "text", "golang", "org", "module"}}
+    tokens = {
+        token
+        for token in re.split(r"[^a-z0-9]+", normalize_name(value))
+        if len(token) >= 3
+    }
+    return {
+        token
+        for token in tokens
+        if token
+        not in {"dev", "lib", "libs", "perl", "text", "golang", "org", "module"}
+    }
 
 
 def _has_meaningful_token_overlap(left: set[str], right: set[str]) -> bool:

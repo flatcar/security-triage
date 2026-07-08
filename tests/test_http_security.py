@@ -3,7 +3,12 @@ import urllib.request
 import pytest
 
 from security_triage import http_utils
-from security_triage.http_utils import HTTPError, _SafeRedirectHandler, fetch_json, fetch_text
+from security_triage.http_utils import (
+    HTTPError,
+    _SafeRedirectHandler,
+    fetch_json,
+    fetch_text,
+)
 
 
 @pytest.mark.parametrize(
@@ -44,7 +49,7 @@ def test_fetch_text_rejects_oversized_response(monkeypatch):
 
         def read(self, amount=None):
             # Return more than the caller asked for to simulate a huge body.
-            return b"x" * ((amount or 0))
+            return b"x" * (amount or 0)
 
     monkeypatch.setattr(http_utils, "MAX_RESPONSE_BYTES", 10)
     monkeypatch.setattr(http_utils, "open_request", lambda *a, **k: FakeResponse())
@@ -67,7 +72,9 @@ def test_fetch_text_allows_https(monkeypatch):
     assert fetch_text("https://example.test/ok") == "ok"
 
 
-def _redirect(original_url: str, new_url: str, headers: dict[str, str]) -> urllib.request.Request | None:
+def _redirect(
+    original_url: str, new_url: str, headers: dict[str, str]
+) -> urllib.request.Request | None:
     handler = _SafeRedirectHandler()
     request = urllib.request.Request(original_url, headers=headers)
     return handler.redirect_request(request, None, 302, "Found", {}, new_url)

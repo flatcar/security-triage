@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import tomllib
@@ -24,7 +23,9 @@ RUSTSEC_ADVISORY_BASE_URL = "https://rustsec.org/advisories"
 JsonFetcher = Callable[[str], Any]
 TextFetcher = Callable[[str], str]
 
-_FRONT_MATTER_RE = re.compile(r"\A\s*```toml\s*\n(.*?)\n```\s*(.*)\Z", re.DOTALL | re.IGNORECASE)
+_FRONT_MATTER_RE = re.compile(
+    r"\A\s*```toml\s*\n(.*?)\n```\s*(.*)\Z", re.DOTALL | re.IGNORECASE
+)
 _HEADING_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
 
 
@@ -48,13 +49,21 @@ def fetch_rustsec_entries(
     text_loader = text_fetcher or _default_text_fetcher
     base = api_url.rstrip("/")
 
-    changed_files = _recent_advisory_files(base, start, end, json_loader, max_pages=max_pages)
-    progress.info(f"rustsec: {len(changed_files)} advisory file(s) changed in processing window")
+    changed_files = _recent_advisory_files(
+        base, start, end, json_loader, max_pages=max_pages
+    )
+    progress.info(
+        f"rustsec: {len(changed_files)} advisory file(s) changed in processing window"
+    )
 
     entries: list[SourceEntry] = []
     for path, change in sorted(changed_files.items()):
-        markdown = _fetch_raw_advisory(path, change, raw_base_url.rstrip("/"), cache_dir, text_loader)
-        entry = _entry_from_markdown(path, markdown, commit_sha=change["sha"], commit_date=change.get("date"))
+        markdown = _fetch_raw_advisory(
+            path, change, raw_base_url.rstrip("/"), cache_dir, text_loader
+        )
+        entry = _entry_from_markdown(
+            path, markdown, commit_sha=change["sha"], commit_date=change.get("date")
+        )
         entries.append(entry)
     return entries
 
@@ -82,7 +91,9 @@ def _recent_advisory_files(
     until = _github_timestamp(end)
     changed: dict[str, dict[str, str]] = {}
     for path_prefix in ("crates", "rust"):
-        for commit in _iter_commits(api_url, path_prefix, since, until, json_fetcher, max_pages=max_pages):
+        for commit in _iter_commits(
+            api_url, path_prefix, since, until, json_fetcher, max_pages=max_pages
+        ):
             detail_url = str(commit.get("url") or "")
             if not detail_url:
                 continue
@@ -93,9 +104,14 @@ def _recent_advisory_files(
             commit_date = _commit_date(detail) or _commit_date(commit)
             for file_info in _dict_list(detail.get("files")):
                 filename = str(file_info.get("filename") or "")
-                if not _is_advisory_path(filename) or file_info.get("status") == "removed":
+                if (
+                    not _is_advisory_path(filename)
+                    or file_info.get("status") == "removed"
+                ):
                     continue
-                if commit_date and not in_window(commit_date, start, end, include_undated=False):
+                if commit_date and not in_window(
+                    commit_date, start, end, include_undated=False
+                ):
                     continue
                 previous = changed.get(filename)
                 if previous and _is_newer_or_equal(previous.get("date"), commit_date):
@@ -119,7 +135,11 @@ def _iter_commits(
 ) -> list[dict[str, Any]]:
     commits: list[dict[str, Any]] = []
     for page in range(1, max_pages + 1):
-        params: list[tuple[str, str]] = [("path", path_prefix), ("per_page", "100"), ("page", str(page))]
+        params: list[tuple[str, str]] = [
+            ("path", path_prefix),
+            ("per_page", "100"),
+            ("page", str(page)),
+        ]
         if since:
             params.append(("since", since))
         if until:
@@ -142,7 +162,10 @@ def _fetch_raw_advisory(
     text_fetcher: TextFetcher,
 ) -> str:
     sha = change.get("sha") or "main"
-    raw_url = change.get("raw_url") or f"{raw_base_url}/{quote(sha, safe='')}/{quote(path, safe='/')}"
+    raw_url = (
+        change.get("raw_url")
+        or f"{raw_base_url}/{quote(sha, safe='')}/{quote(path, safe='/')}"
+    )
     if cache_dir is None:
         return text_fetcher(raw_url)
 
@@ -167,11 +190,19 @@ def _cache_path(root: Path, path: str, sha: str) -> Path:
     return root / "rustsec" / safe_sha / safe_path
 
 
-def _entry_from_markdown(path: str, markdown: str, *, commit_sha: str, commit_date: str | None) -> SourceEntry:
+def _entry_from_markdown(
+    path: str, markdown: str, *, commit_sha: str, commit_date: str | None
+) -> SourceEntry:
     metadata, body = _parse_advisory_markdown(markdown)
-    advisory = metadata.get("advisory") if isinstance(metadata.get("advisory"), dict) else {}
-    versions = metadata.get("versions") if isinstance(metadata.get("versions"), dict) else {}
-    affected = metadata.get("affected") if isinstance(metadata.get("affected"), dict) else {}
+    advisory = (
+        metadata.get("advisory") if isinstance(metadata.get("advisory"), dict) else {}
+    )
+    versions = (
+        metadata.get("versions") if isinstance(metadata.get("versions"), dict) else {}
+    )
+    affected = (
+        metadata.get("affected") if isinstance(metadata.get("affected"), dict) else {}
+    )
 
     advisory_id = str(advisory.get("id") or Path(path).stem)
     package = str(advisory.get("package") or "").strip()
@@ -184,7 +215,9 @@ def _entry_from_markdown(path: str, markdown: str, *, commit_sha: str, commit_da
     unaffected_versions = _string_list(versions.get("unaffected"))
     title = _markdown_title(body) or f"{advisory_id}: {package or 'RustSec advisory'}"
 
-    references = _unique([rustsec_url, advisory_url or "", *reference_urls, *aliases, *related, package])
+    references = _unique(
+        [rustsec_url, advisory_url or "", *reference_urls, *aliases, *related, package]
+    )
     entry_metadata = {
         "id": advisory_id,
         "package": package,
@@ -279,7 +312,11 @@ def _github_timestamp(value: str | None) -> str | None:
 
 
 def _commit_date(commit_payload: dict[str, Any]) -> str | None:
-    commit = commit_payload.get("commit") if isinstance(commit_payload.get("commit"), dict) else {}
+    commit = (
+        commit_payload.get("commit")
+        if isinstance(commit_payload.get("commit"), dict)
+        else {}
+    )
     for actor_key in ("committer", "author"):
         actor = commit.get(actor_key) if isinstance(commit.get(actor_key), dict) else {}
         date_value = _string_or_none(actor.get("date"))
@@ -289,7 +326,9 @@ def _commit_date(commit_payload: dict[str, Any]) -> str | None:
 
 
 def _is_advisory_path(path: str) -> bool:
-    return (path.startswith("crates/") or path.startswith("rust/")) and path.endswith(".md")
+    return (path.startswith("crates/") or path.startswith("rust/")) and path.endswith(
+        ".md"
+    )
 
 
 def _is_newer_or_equal(existing: str | None, candidate: str | None) -> bool:
@@ -308,7 +347,11 @@ def _markdown_title(body: str) -> str | None:
 
 
 def _dict_list(value: Any) -> list[dict[str, Any]]:
-    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+    return (
+        [item for item in value if isinstance(item, dict)]
+        if isinstance(value, list)
+        else []
+    )
 
 
 def _string_list(value: Any) -> list[str]:

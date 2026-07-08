@@ -33,6 +33,8 @@ def test_feed_parser_still_handles_normal_feed():
       <link>https://example.test/advisory</link>
       <description>Package: openssl</description>
     </item></channel></rss>"""
-    entries = parse_feed_entries(SourceSpec("generic", "https://example.test/feed"), rss)
+    entries = parse_feed_entries(
+        SourceSpec("generic", "https://example.test/feed"), rss
+    )
     assert len(entries) == 1
     assert entries[0].title == "openssl CVE-2026-1"

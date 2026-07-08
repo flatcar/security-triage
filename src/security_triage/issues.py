@@ -11,9 +11,18 @@ from typing import Any
 from .http_utils import HTTPError, fetch_json, open_request
 from .io_utils import load_structured_file
 from .records import Issue, ParsedIssue
-from .rules import ADVISORY_ISSUE_QUERY, active_markdown_text, extract_cves, normalize_name, parse_cvss_scores
+from .rules import (
+    ADVISORY_ISSUE_QUERY,
+    active_markdown_text,
+    extract_cves,
+    normalize_name,
+    parse_cvss_scores,
+)
 
-_FIELD_RE = re.compile(r"^\s*(?:\*\*)?(Name|CVEs|CVSSs|Action Needed|Summary|refmap\.gentoo)(?:\*\*)?:\s*(.*)$", re.IGNORECASE)
+_FIELD_RE = re.compile(
+    r"^\s*(?:\*\*)?(Name|CVEs|CVSSs|Action Needed|Summary|refmap\.gentoo)(?:\*\*)?:\s*(.*)$",
+    re.IGNORECASE,
+)
 _TITLE_RE = re.compile(r"^update:\s*(.+)$", re.IGNORECASE)
 
 
@@ -27,18 +36,24 @@ class GitHubIssueClient:
         self.token = token or os.getenv("GITHUB_TOKEN")
         self.api_base = "https://api.github.com"
 
-    def fetch_open_advisory_issues(self, query: str = ADVISORY_ISSUE_QUERY) -> list[Issue]:
+    def fetch_open_advisory_issues(
+        self, query: str = ADVISORY_ISSUE_QUERY
+    ) -> list[Issue]:
         issues: list[Issue] = []
         page = 1
         while True:
-            encoded = urllib.parse.urlencode({"q": query, "per_page": "100", "page": str(page)})
+            encoded = urllib.parse.urlencode(
+                {"q": query, "per_page": "100", "page": str(page)}
+            )
             payload = fetch_json(
                 f"{self.api_base}/search/issues?{encoded}",
                 token=self.token,
                 accept="application/vnd.github+json",
             )
             items = payload.get("items", [])
-            issues.extend(issue_from_api(item) for item in items if "pull_request" not in item)
+            issues.extend(
+                issue_from_api(item) for item in items if "pull_request" not in item
+            )
             if len(items) < 100:
                 break
             page += 1
@@ -52,17 +67,27 @@ class GitHubIssueClient:
         )
 
     def update_issue_body(self, issue_number: int, body: str) -> dict[str, Any]:
-        return self._request_json("PATCH", f"/repos/{self.repo}/issues/{issue_number}", {"body": body})
+        return self._request_json(
+            "PATCH", f"/repos/{self.repo}/issues/{issue_number}", {"body": body}
+        )
 
     def post_comment(self, issue_number: int, body: str) -> dict[str, Any]:
-        return self._request_json("POST", f"/repos/{self.repo}/issues/{issue_number}/comments", {"body": body})
+        return self._request_json(
+            "POST", f"/repos/{self.repo}/issues/{issue_number}/comments", {"body": body}
+        )
 
     def close_issue(self, issue_number: int) -> dict[str, Any]:
-        return self._request_json("PATCH", f"/repos/{self.repo}/issues/{issue_number}", {"state": "closed"})
+        return self._request_json(
+            "PATCH", f"/repos/{self.repo}/issues/{issue_number}", {"state": "closed"}
+        )
 
-    def _request_json(self, method: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _request_json(
+        self, method: str, path: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
         if not self.token:
-            raise GitHubConfigError("GITHUB_TOKEN is required for GitHub write operations")
+            raise GitHubConfigError(
+                "GITHUB_TOKEN is required for GitHub write operations"
+            )
         request = urllib.request.Request(
             f"{self.api_base}{path}",
             data=json.dumps(payload).encode("utf-8"),
@@ -79,14 +104,18 @@ class GitHubIssueClient:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
-            raise HTTPError(f"GitHub API HTTP {exc.code} for {path}: {body[:500]}") from exc
+            raise HTTPError(
+                f"GitHub API HTTP {exc.code} for {path}: {body[:500]}"
+            ) from exc
 
 
 def load_issue_fixture(path: str) -> list[Issue]:
     payload = load_structured_file(path)
     items = payload.get("issues", payload) if isinstance(payload, dict) else payload
     if not isinstance(items, list):
-        raise ValueError("Issue fixture must be a list or an object with an 'issues' list")
+        raise ValueError(
+            "Issue fixture must be a list or an object with an 'issues' list"
+        )
     return [issue_from_api(item) for item in items]
 
 
@@ -117,7 +146,9 @@ def parse_issue_body(body: str) -> ParsedIssue:
             continue
         if current_key and line.strip():
             separator = "\n" if fields.get(current_key) else ""
-            fields[current_key] = f"{fields.get(current_key, '')}{separator}{line.strip()}"
+            fields[current_key] = (
+                f"{fields.get(current_key, '')}{separator}{line.strip()}"
+            )
 
     required = ["Name", "CVEs", "CVSSs", "Action Needed", "Summary", "refmap.gentoo"]
     missing = [field for field in required if field not in seen_keys]
@@ -156,7 +187,9 @@ def issue_package_from_title(title: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
-def find_existing_issue_matches(extraction: dict[str, Any], issues: list[Issue]) -> list[dict[str, Any]]:
+def find_existing_issue_matches(
+    extraction: dict[str, Any], issues: list[Issue]
+) -> list[dict[str, Any]]:
     package_name = extraction.get("package_name") or ""
     normalized_package = normalize_name(package_name)
     cves = set(extraction.get("cves") or [])
@@ -167,7 +200,11 @@ def find_existing_issue_matches(extraction: dict[str, Any], issues: list[Issue])
         normalized_issue_package = normalize_name(issue_package)
         issue_cves = set(parsed.cves)
         reasons: list[str] = []
-        if normalized_package and normalized_issue_package and normalized_package == normalized_issue_package:
+        if (
+            normalized_package
+            and normalized_issue_package
+            and normalized_package == normalized_issue_package
+        ):
             reasons.append("package_name")
         if cves and issue_cves and cves.intersection(issue_cves):
             reasons.append("cve_overlap")

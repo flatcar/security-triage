@@ -8,7 +8,10 @@ from security_triage.rules import (
 
 
 def test_extract_cves_deduplicates_and_uppercases():
-    assert extract_cves("cve-2026-1234 CVE-2026-1234 CVE-2026-99999") == ["CVE-2026-1234", "CVE-2026-99999"]
+    assert extract_cves("cve-2026-1234 CVE-2026-1234 CVE-2026-99999") == [
+        "CVE-2026-1234",
+        "CVE-2026-99999",
+    ]
 
 
 def test_severity_label_mapping():
@@ -19,12 +22,29 @@ def test_severity_label_mapping():
 
 
 def test_issue_labels_are_restricted_and_scoped():
-    assert issue_labels(["8.1"], "sysext") == ["advisory", "security", "advisory/sysext", "cvss/HIGH"]
-    assert issue_labels(["9.1"], "sdk_only") == ["advisory", "security", "advisory/only-sdk", "cvss/CRITICAL"]
+    assert issue_labels(["8.1"], "sysext") == [
+        "advisory",
+        "security",
+        "advisory/sysext",
+        "cvss/HIGH",
+    ]
+    assert issue_labels(["9.1"], "sdk_only") == [
+        "advisory",
+        "security",
+        "advisory/only-sdk",
+        "cvss/CRITICAL",
+    ]
 
 
 def test_render_issue_body_exact_field_order():
-    body = render_issue_body("openssl", ["CVE-2026-1"], ["8.8"], "update to >= 3.2.4", "summary", "https://bugs.gentoo.org/1")
+    body = render_issue_body(
+        "openssl",
+        ["CVE-2026-1"],
+        ["8.8"],
+        "update to >= 3.2.4",
+        "summary",
+        "https://bugs.gentoo.org/1",
+    )
     assert body.splitlines() == [
         "Name: openssl",
         "CVEs: CVE-2026-1",

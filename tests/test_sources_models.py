@@ -4,11 +4,11 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from security_triage.models import (
-    BaseModelClient,
     DEFAULT_ENDPOINT,
     DEFAULT_FOUNDRY_API_VERSION,
     DEFAULT_FOUNDRY_DEPLOYMENT,
     DEFAULT_MODEL,
+    BaseModelClient,
     FoundryModelsClient,
     GitHubModelsClient,
     HeuristicModelClient,
@@ -16,8 +16,19 @@ from security_triage.models import (
     RoutingModelClient,
 )
 from security_triage.records import Issue
-from security_triage.rules import coerce_cleanup_review, coerce_discovery_decision, coerce_relevance
-from security_triage.sources import SourceSpec, fetch_gentoo_entries, filter_entries_by_window, parse_feed_entries, parse_html_entries, source_entry_from_mapping
+from security_triage.rules import (
+    coerce_cleanup_review,
+    coerce_discovery_decision,
+    coerce_relevance,
+)
+from security_triage.sources import (
+    SourceSpec,
+    fetch_gentoo_entries,
+    filter_entries_by_window,
+    parse_feed_entries,
+    parse_html_entries,
+    source_entry_from_mapping,
+)
 from security_triage.time_utils import in_window, parse_datetime
 
 
@@ -31,12 +42,16 @@ def test_parse_rss_feed_source_entry():
       <guid>advisory-1</guid>
     </item></channel></rss>
     """
-    entries = parse_feed_entries(SourceSpec("oss_security", "https://example.test/feed"), rss)
+    entries = parse_feed_entries(
+        SourceSpec("oss_security", "https://example.test/feed"), rss
+    )
     assert len(entries) == 1
     assert entries[0].entry_id == "advisory-1"
     assert entries[0].source_url == "https://example.test/advisory"
     assert "openssl" in entries[0].content
-    assert in_window(entries[0].published_at, "2026-04-29T00:00:00Z", "2026-04-30T00:00:00Z")
+    assert in_window(
+        entries[0].published_at, "2026-04-29T00:00:00Z", "2026-04-30T00:00:00Z"
+    )
 
 
 def test_parse_html_source_links_security_entries():
@@ -44,7 +59,9 @@ def test_parse_html_source_links_security_entries():
       <a href="/safe">general post</a>
       <a href="/cve">CVE-2026-2 package advisory</a>
     </body></html>"""
-    entries = parse_html_entries(SourceSpec("oss_security", "https://example.test/archive"), html)
+    entries = parse_html_entries(
+        SourceSpec("oss_security", "https://example.test/archive"), html
+    )
     assert len(entries) == 1
     assert entries[0].source_url == "https://example.test/cve"
 
@@ -80,14 +97,21 @@ def test_discovery_window_prefers_published_time_over_recent_update():
 
 
 def test_window_filter_can_exclude_undated_live_entries():
-    undated = source_entry_from_mapping({"source": "oss_security", "entry_id": "undated", "title": "undated"})
-    assert filter_entries_by_window([undated], "2026-04-23T00:00:00Z", "2026-04-30T00:00:00Z") == [undated]
+    undated = source_entry_from_mapping(
+        {"source": "oss_security", "entry_id": "undated", "title": "undated"}
+    )
     assert filter_entries_by_window(
-        [undated],
-        "2026-04-23T00:00:00Z",
-        "2026-04-30T00:00:00Z",
-        include_undated=False,
-    ) == []
+        [undated], "2026-04-23T00:00:00Z", "2026-04-30T00:00:00Z"
+    ) == [undated]
+    assert (
+        filter_entries_by_window(
+            [undated],
+            "2026-04-23T00:00:00Z",
+            "2026-04-30T00:00:00Z",
+            include_undated=False,
+        )
+        == []
+    )
 
 
 def test_gentoo_bugzilla_fetch_uses_window_and_enriches_comments(monkeypatch):
@@ -123,7 +147,10 @@ def test_gentoo_bugzilla_fetch_uses_window_and_enriches_comments(monkeypatch):
                     "alias": ["CVE-2026-39999"],
                     "component": "Vulnerabilities",
                     "creation_time": "2026-04-24T10:00:00Z",
-                    "creator_detail": {"email": "security@gentoo.org", "name": "security@gentoo.org"},
+                    "creator_detail": {
+                        "email": "security@gentoo.org",
+                        "name": "security@gentoo.org",
+                    },
                     "last_change_time": "2026-04-29T10:00:00Z",
                     "product": "Gentoo Security",
                     "see_also": ["https://openssl.example/advisory"],
@@ -144,16 +171,29 @@ def test_gentoo_bugzilla_fetch_uses_window_and_enriches_comments(monkeypatch):
     include_fields = set(query["include_fields"][0].split(","))
     assert query["chfieldfrom"] == ["2026-04-23T00:00:00Z"]
     assert query["chfieldto"] == ["2026-04-30T00:00:00Z"]
-    assert {"alias", "creator_detail", "see_also", "severity", "summary", "url"}.issubset(include_fields)
+    assert {
+        "alias",
+        "creator_detail",
+        "see_also",
+        "severity",
+        "summary",
+        "url",
+    }.issubset(include_fields)
     assert parse_qs(urlparse(requested_urls[1]).query)["ids"] == ["973999"]
 
     entry = entries[0]
     assert entry.metadata["alias"] == ["CVE-2026-39999"]
-    assert entry.description == "Initial Bugzilla description with affected package context."
+    assert (
+        entry.description
+        == "Initial Bugzilla description with affected package context."
+    )
     assert entry.comments[0]["is_creator"] is True
     assert entry.new_comments[0]["count"] == 1
     assert "Aliases: CVE-2026-39999" in entry.content
-    assert "Severity source: https://nvd.nist.gov/vuln/detail/CVE-2026-39999" in entry.content
+    assert (
+        "Severity source: https://nvd.nist.gov/vuln/detail/CVE-2026-39999"
+        in entry.content
+    )
 
 
 def test_parse_datetime_supports_rfc_2822_feed_dates():
@@ -177,9 +217,18 @@ def test_heuristic_model_normalizes_malformed_issue_from_title():
 
 
 def test_model_schema_coercion_falls_back_to_manual_review():
-    assert coerce_relevance({"status": "definitely", "scope": "planet"})["status"] == "needs_manual_review"
-    assert coerce_discovery_decision({"action": "delete_issue"})["action"] == "needs_manual_review"
-    assert coerce_cleanup_review({"decision": "close_it"})["decision"] == "needs_manual_review"
+    assert (
+        coerce_relevance({"status": "definitely", "scope": "planet"})["status"]
+        == "needs_manual_review"
+    )
+    assert (
+        coerce_discovery_decision({"action": "delete_issue"})["action"]
+        == "needs_manual_review"
+    )
+    assert (
+        coerce_cleanup_review({"decision": "close_it"})["decision"]
+        == "needs_manual_review"
+    )
 
 
 def test_routing_model_uses_primary_client_for_cleanup_review():
@@ -192,14 +241,20 @@ def test_routing_model_uses_primary_client_for_cleanup_review():
 
         def review_cleanup(self, evidence_bundle):
             self.calls += 1
-            return {"decision": "needs_manual_review", "confidence": "low", "reasons": [self.model]}
+            return {
+                "decision": "needs_manual_review",
+                "confidence": "low",
+                "reasons": [self.model],
+            }
 
     primary = ReviewClient("primary")
     cheaper = ReviewClient("cheaper")
     client = RoutingModelClient(primary=primary, extraction=cheaper)
 
     client.review_cleanup({"preliminary_status": "needs_manual_review"})
-    client.review_cleanup({"preliminary_status": "remediated_in_current_production_sbom"})
+    client.review_cleanup(
+        {"preliminary_status": "remediated_in_current_production_sbom"}
+    )
 
     assert cheaper.calls == 0
     assert primary.calls == 2
@@ -216,12 +271,16 @@ def test_github_models_request_matches_github_api(monkeypatch):
             return False
 
         def read(self):
-            return json.dumps({"choices": [{"message": {"content": '{"ok": true}'}}]}).encode("utf-8")
+            return json.dumps(
+                {"choices": [{"message": {"content": '{"ok": true}'}}]}
+            ).encode("utf-8")
 
     def fake_urlopen(request, timeout):
         captured["url"] = request.full_url
         captured["method"] = request.get_method()
-        captured["headers"] = {key.lower(): value for key, value in request.header_items()}
+        captured["headers"] = {
+            key.lower(): value for key, value in request.header_items()
+        }
         captured["payload"] = json.loads(request.data.decode("utf-8"))
         captured["timeout"] = timeout
         return FakeResponse()
@@ -257,25 +316,38 @@ def test_foundry_models_request_matches_azure_openai_api(monkeypatch):
             return False
 
         def read(self):
-            return json.dumps({"choices": [{"message": {"content": '{"ok": true}'}}]}).encode("utf-8")
+            return json.dumps(
+                {"choices": [{"message": {"content": '{"ok": true}'}}]}
+            ).encode("utf-8")
 
     def fake_urlopen(request, timeout):
         captured["url"] = request.full_url
         captured["method"] = request.get_method()
-        captured["headers"] = {key.lower(): value for key, value in request.header_items()}
+        captured["headers"] = {
+            key.lower(): value for key, value in request.header_items()
+        }
         captured["payload"] = json.loads(request.data.decode("utf-8"))
         captured["timeout"] = timeout
         return FakeResponse()
 
     monkeypatch.setattr("security_triage.models.urllib.request.urlopen", fake_urlopen)
 
-    client = FoundryModelsClient(bearer_token="test-token", endpoint="https://example-foundry.cognitiveservices.azure.com")
+    client = FoundryModelsClient(
+        bearer_token="test-token",
+        endpoint="https://example-foundry.cognitiveservices.azure.com",
+    )
     result = client._complete_json("unit_test", "system prompt", {"hello": "world"})
 
     assert result == {"ok": True}
     parsed_url = urlparse(captured["url"])
-    assert f"{parsed_url.scheme}://{parsed_url.netloc}" == "https://example-foundry.cognitiveservices.azure.com"
-    assert parsed_url.path == f"/openai/deployments/{DEFAULT_FOUNDRY_DEPLOYMENT}/chat/completions"
+    assert (
+        f"{parsed_url.scheme}://{parsed_url.netloc}"
+        == "https://example-foundry.cognitiveservices.azure.com"
+    )
+    assert (
+        parsed_url.path
+        == f"/openai/deployments/{DEFAULT_FOUNDRY_DEPLOYMENT}/chat/completions"
+    )
     assert parse_qs(parsed_url.query) == {"api-version": [DEFAULT_FOUNDRY_API_VERSION]}
     assert captured["method"] == "POST"
     assert captured["headers"]["accept"] == "application/json"
@@ -301,12 +373,16 @@ def test_foundry_models_request_supports_project_openai_v1_endpoint(monkeypatch)
             return False
 
         def read(self):
-            return json.dumps({"choices": [{"message": {"content": '{"ok": true}'}}]}).encode("utf-8")
+            return json.dumps(
+                {"choices": [{"message": {"content": '{"ok": true}'}}]}
+            ).encode("utf-8")
 
     def fake_urlopen(request, timeout):
         captured["url"] = request.full_url
         captured["method"] = request.get_method()
-        captured["headers"] = {key.lower(): value for key, value in request.header_items()}
+        captured["headers"] = {
+            key.lower(): value for key, value in request.header_items()
+        }
         captured["payload"] = json.loads(request.data.decode("utf-8"))
         captured["timeout"] = timeout
         return FakeResponse()
@@ -323,7 +399,10 @@ def test_foundry_models_request_supports_project_openai_v1_endpoint(monkeypatch)
 
     assert result == {"ok": True}
     parsed_url = urlparse(captured["url"])
-    assert f"{parsed_url.scheme}://{parsed_url.netloc}" == "https://example-foundry.services.ai.azure.com"
+    assert (
+        f"{parsed_url.scheme}://{parsed_url.netloc}"
+        == "https://example-foundry.services.ai.azure.com"
+    )
     assert parsed_url.path == "/api/projects/example-project/openai/v1/chat/completions"
     assert parsed_url.query == ""
     assert client.metadata()["endpoint_family"] == "openai_v1"

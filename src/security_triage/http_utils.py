@@ -19,7 +19,9 @@ class HTTPError(RuntimeError):
 def _require_allowed_url(url: str) -> None:
     scheme = urllib.parse.urlsplit(url).scheme.lower()
     if scheme not in ALLOWED_SCHEMES:
-        raise HTTPError(f"Refusing to fetch non-HTTP(S) URL scheme {scheme or '(none)'!r}: {url}")
+        raise HTTPError(
+            f"Refusing to fetch non-HTTP(S) URL scheme {scheme or '(none)'!r}: {url}"
+        )
 
 
 def _origin(url: str) -> tuple[str, str, int | None]:
@@ -52,7 +54,9 @@ def open_request(request: urllib.request.Request, timeout: int):
     return _OPENER.open(request, timeout=timeout)
 
 
-def fetch_text(url: str, token: str | None = None, timeout: int = 30, accept: str = "*/*") -> str:
+def fetch_text(
+    url: str, token: str | None = None, timeout: int = 30, accept: str = "*/*"
+) -> str:
     _require_allowed_url(url)
     headers = {
         "Accept": accept,
@@ -74,5 +78,10 @@ def fetch_text(url: str, token: str | None = None, timeout: int = 30, accept: st
     return data.decode("utf-8", errors="replace")
 
 
-def fetch_json(url: str, token: str | None = None, timeout: int = 30, accept: str = "application/json") -> Any:
+def fetch_json(
+    url: str,
+    token: str | None = None,
+    timeout: int = 30,
+    accept: str = "application/json",
+) -> Any:
     return json.loads(fetch_text(url, token=token, timeout=timeout, accept=accept))
