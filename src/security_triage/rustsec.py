@@ -194,15 +194,12 @@ def _entry_from_markdown(
     path: str, markdown: str, *, commit_sha: str, commit_date: str | None
 ) -> SourceEntry:
     metadata, body = _parse_advisory_markdown(markdown)
-    advisory = (
-        metadata.get("advisory") if isinstance(metadata.get("advisory"), dict) else {}
-    )
-    versions = (
-        metadata.get("versions") if isinstance(metadata.get("versions"), dict) else {}
-    )
-    affected = (
-        metadata.get("affected") if isinstance(metadata.get("affected"), dict) else {}
-    )
+    raw_advisory = metadata.get("advisory")
+    advisory: dict[str, Any] = raw_advisory if isinstance(raw_advisory, dict) else {}
+    raw_versions = metadata.get("versions")
+    versions: dict[str, Any] = raw_versions if isinstance(raw_versions, dict) else {}
+    raw_affected = metadata.get("affected")
+    affected: dict[str, Any] = raw_affected if isinstance(raw_affected, dict) else {}
 
     advisory_id = str(advisory.get("id") or Path(path).stem)
     package = str(advisory.get("package") or "").strip()
@@ -312,13 +309,11 @@ def _github_timestamp(value: str | None) -> str | None:
 
 
 def _commit_date(commit_payload: dict[str, Any]) -> str | None:
-    commit = (
-        commit_payload.get("commit")
-        if isinstance(commit_payload.get("commit"), dict)
-        else {}
-    )
+    raw_commit = commit_payload.get("commit")
+    commit: dict[str, Any] = raw_commit if isinstance(raw_commit, dict) else {}
     for actor_key in ("committer", "author"):
-        actor = commit.get(actor_key) if isinstance(commit.get(actor_key), dict) else {}
+        raw_actor = commit.get(actor_key)
+        actor: dict[str, Any] = raw_actor if isinstance(raw_actor, dict) else {}
         date_value = _string_or_none(actor.get("date"))
         if date_value:
             return date_value

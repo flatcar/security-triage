@@ -132,18 +132,18 @@ class GitHubModelsClient(BaseModelClient):
             raise ModelConfigError(
                 "GITHUB_TOKEN is required when --model github is selected"
             )
-        self.model = model or os.getenv("GITHUB_MODELS_MODEL", DEFAULT_MODEL)
+        self.model = model or os.getenv("GITHUB_MODELS_MODEL") or DEFAULT_MODEL
         if self.model in KNOWN_BAD_MODEL_HINTS:
             replacement = KNOWN_BAD_MODEL_HINTS[self.model]
             raise ModelConfigError(
                 f"GITHUB_MODELS_MODEL={self.model} is not a valid GitHub Models model for this endpoint. "
                 f"Set GITHUB_MODELS_MODEL={replacement} or remove the old value from .env."
             )
-        self.endpoint = endpoint or os.getenv(
-            "GITHUB_MODELS_ENDPOINT", DEFAULT_ENDPOINT
+        self.endpoint = (
+            endpoint or os.getenv("GITHUB_MODELS_ENDPOINT") or DEFAULT_ENDPOINT
         )
-        self.api_version = api_version or os.getenv(
-            "GITHUB_MODELS_API_VERSION", DEFAULT_API_VERSION
+        self.api_version = (
+            api_version or os.getenv("GITHUB_MODELS_API_VERSION") or DEFAULT_API_VERSION
         )
         self.reasoning_effort = (
             reasoning_effort
@@ -715,7 +715,7 @@ class FixtureModelClient(BaseModelClient):
         )
         if response is None:
             return self.fallback.normalize_issue(issue)
-        return response
+        return response  # type: ignore[no-any-return]
 
     def review_cleanup(self, evidence_bundle: dict[str, Any]) -> dict[str, Any]:
         issue_number = evidence_bundle.get("issue", {}).get("number")

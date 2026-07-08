@@ -418,7 +418,7 @@ def _window(args: argparse.Namespace) -> tuple[str, str]:
 
 def _output_format(args: argparse.Namespace) -> str:
     if args.format:
-        return args.format
+        return str(args.format)
     suffix = Path(args.output).suffix.lower()
     return "yaml" if suffix in {".yaml", ".yml"} else "json"
 

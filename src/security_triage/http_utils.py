@@ -38,7 +38,7 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
     which would bypass the http/https allowlist enforced on the initial URL.
     """
 
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override,no-untyped-def]
         _require_allowed_url(newurl)
         new_request = super().redirect_request(req, fp, code, msg, headers, newurl)
         if new_request is not None and _origin(newurl) != _origin(req.full_url):
@@ -49,7 +49,7 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
 _OPENER = urllib.request.build_opener(_SafeRedirectHandler)
 
 
-def open_request(request: urllib.request.Request, timeout: int):
+def open_request(request: urllib.request.Request, timeout: int) -> Any:
     """Open ``request`` with redirect-safe handling (see _SafeRedirectHandler)."""
     return _OPENER.open(request, timeout=timeout)
 
@@ -67,7 +67,7 @@ def fetch_text(
     request = urllib.request.Request(url, headers=headers)
     try:
         with open_request(request, timeout=timeout) as response:
-            data = response.read(MAX_RESPONSE_BYTES + 1)
+            data: bytes = response.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise HTTPError(f"HTTP {exc.code} for {url}: {body[:500]}") from exc

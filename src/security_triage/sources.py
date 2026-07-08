@@ -546,7 +546,8 @@ def parse_feed_entries(spec: SourceSpec, text: str) -> list[SourceEntry]:
     for item in root.findall(".//atom:entry", atom_ns):
         title = _xml_text(item, "atom:title", atom_ns)
         link_node = item.find("atom:link", atom_ns)
-        link = link_node.attrib.get("href") if link_node is not None else spec.url
+        link_href = link_node.attrib.get("href") if link_node is not None else None
+        link = link_href or spec.url
         content = _xml_text(item, "atom:content", atom_ns) or _xml_text(
             item, "atom:summary", atom_ns
         )

@@ -101,7 +101,7 @@ class GitHubIssueClient:
         )
         try:
             with open_request(request, timeout=30) as response:
-                return json.loads(response.read().decode("utf-8"))
+                return json.loads(response.read().decode("utf-8"))  # type: ignore[no-any-return]
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             raise HTTPError(
