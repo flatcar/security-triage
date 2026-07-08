@@ -1,0 +1,70 @@
+name: 🔨 Install dependencies
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  install:
+    name: 🔨 Install Python ${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.12", "3.13", "3.14"]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v2
+
+      - name: Build package
+        run: |
+          uv build
+
+      - name: Create isolated venv (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          uv venv .wheel-test-env --python "${{ matrix.python-version }}"
+
+      - name: Create isolated venv (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          uv venv .wheel-test-env --python "${{ matrix.python-version }}"
+
+      - name: Install wheel in isolated venv (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          uv pip install --python ./.wheel-test-env/bin/python dist/security_triage-*.whl
+
+      - name: Install wheel in isolated venv (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $wheel = Get-ChildItem dist/*.whl | Select-Object -First 1
+          if (-not $wheel) {
+            throw "No wheel file found in dist/"
+          }
+          uv pip install --python ./.wheel-test-env/Scripts/python.exe "$($wheel.FullName)"
+
+      - name: Verify installed package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          ./.wheel-test-env/bin/python -c "from security_triage.cli import main; print('Package imports successfully')"
+          ./.wheel-test-env/bin/security-triage --version
+
+      - name: Verify installed package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          ./.wheel-test-env/Scripts/python.exe -c "from security_triage.cli import main; print('Package imports successfully')"
+          $entrypoint = Get-ChildItem ./.wheel-test-env/Scripts/security-triage* | Select-Object -First 1
+          if (-not $entrypoint) {
+            throw "Could not find installed security-triage entrypoint"
+          }
+          & $entrypoint.FullName --version
