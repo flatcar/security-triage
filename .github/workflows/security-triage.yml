@@ -1,0 +1,68 @@
+name: Flatcar Security Triage
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: read
+  models: read
+
+jobs:
+  read-only-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install
+        run: python -m pip install -e '.[yaml]'
+
+      - name: Restore prompt cache
+        id: prompt-cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: .prompt-cache
+          key: flatcar-prompt-cache-${{ github.run_id }}
+          restore-keys: |
+            flatcar-prompt-cache-
+
+      - name: Discovery
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          FLATCAR_PROMPT_CACHE_DIR: .prompt-cache
+        run: |
+          security-triage discovery \
+            --model github \
+            --output reports/discovery.json \
+            --markdown-output reports/discovery.md \
+            --debug-log reports/discovery-debug.jsonl
+
+      - name: Cleanup
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          FLATCAR_PROMPT_CACHE_DIR: .prompt-cache
+        run: |
+          security-triage cleanup \
+            --model github \
+            --output reports/cleanup.json \
+            --markdown-output reports/cleanup.md \
+            --debug-log reports/cleanup-debug.jsonl
+
+      - name: Save prompt cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .prompt-cache
+          key: flatcar-prompt-cache-${{ github.run_id }}
+
+      - name: Upload reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-triage-reports
+          path: reports/

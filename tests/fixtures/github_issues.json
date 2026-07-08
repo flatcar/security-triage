@@ -1,0 +1,52 @@
+{
+  "issues": [
+    {
+      "number": 2109,
+      "title": "update: rust-openssl",
+      "html_url": "https://github.com/flatcar/Flatcar/issues/2109",
+      "state": "open",
+      "labels": [{"name": "advisory"}, {"name": "security"}, {"name": "cvss/HIGH"}],
+      "body": "Name: rust-openssl\nCVEs: CVE-2026-10001\nCVSSs: 8.1\nAction Needed: update to >= 0.10.78\nSummary: Rust OpenSSL bindings need an update for upstream OpenSSL fixes.\n\nrefmap.gentoo: https://bugs.gentoo.org/10001"
+    },
+    {
+      "number": 2088,
+      "title": "update: libgcrypt",
+      "html_url": "https://github.com/flatcar/Flatcar/issues/2088",
+      "state": "open",
+      "labels": [{"name": "advisory"}, {"name": "security"}],
+      "body": "Name: libgcrypt\nCVEs: upstream-libgcrypt-side-channel\nCVSSs: n/a\nAction Needed: update to >= 1.12.2\nSummary: libgcrypt has an upstream side-channel hardening fix.\n\nrefmap.gentoo: https://bugs.gentoo.org/2088"
+    },
+    {
+      "number": 1970,
+      "title": "update: c-ares",
+      "html_url": "https://github.com/flatcar/Flatcar/issues/1970",
+      "state": "open",
+      "labels": [{"name": "advisory"}, {"name": "security"}, {"name": "cvss/MEDIUM"}],
+      "body": "Name: c-ares\nCVEs: CVE-2026-20001\nCVSSs: 6.5\nAction Needed: update to >= 1.35.0\nSummary: c-ares resolver issue fixed upstream.\n\nrefmap.gentoo: https://bugs.gentoo.org/1970"
+    },
+    {
+      "number": 2082,
+      "title": "update: sssd",
+      "html_url": "https://github.com/flatcar/Flatcar/issues/2082",
+      "state": "open",
+      "labels": [{"name": "advisory"}, {"name": "security"}, {"name": "cvss/MEDIUM"}],
+      "body": "Name: sssd\nCVEs: CVE-2026-20002\nCVSSs: 5.9\nAction Needed: TBD\nSummary: sssd upstream advisory needs version investigation.\n\nrefmap.gentoo: TBD"
+    },
+    {
+      "number": 2083,
+      "title": "update: podman",
+      "html_url": "https://github.com/flatcar/Flatcar/issues/2083",
+      "state": "open",
+      "labels": [{"name": "advisory"}, {"name": "security"}, {"name": "advisory/sysext"}, {"name": "cvss/MEDIUM"}],
+      "body": "Name: podman\nCVEs: CVE-2026-20003\nCVSSs: 6.8\nAction Needed: update to >= 5.4.2\nSummary: Podman sysext advisory. Note: this package is tracked for the system extension.\n\nrefmap.gentoo: https://bugs.gentoo.org/2083"
+    },
+    {
+      "number": 2084,
+      "title": "update: perl",
+      "html_url": "https://github.com/flatcar/Flatcar/issues/2084",
+      "state": "open",
+      "labels": [{"name": "advisory"}, {"name": "security"}, {"name": "advisory/only-sdk"}, {"name": "cvss/CRITICAL"}],
+      "body": "Name: perl\nCVEs: CVE-2026-20004\nCVSSs: 9.8\nAction Needed: update to >= 5.40.3\nSummary: Perl is only included in SDK scope.\n\nrefmap.gentoo: https://bugs.gentoo.org/2084"
+    }
+  ]
+}

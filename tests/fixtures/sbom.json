@@ -1,0 +1,72 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "Flatcar production image fixture",
+  "documentNamespace": "https://example.test/flatcar/sbom/fixture",
+  "creationInfo": {
+    "created": "2026-04-29T00:00:00Z",
+    "creators": ["Tool: fixture"]
+  },
+  "packages": [
+    {
+      "name": "openssl",
+      "versionInfo": "3.2.4",
+      "SPDXID": "SPDXRef-Package-openssl",
+      "supplier": "Organization: Gentoo",
+      "downloadLocation": "NOASSERTION",
+      "externalRefs": [
+        {"referenceCategory": "PACKAGE-MANAGER", "referenceType": "purl", "referenceLocator": "pkg:gentoo/dev-libs/openssl@3.2.4"}
+      ]
+    },
+    {
+      "name": "libgcrypt",
+      "versionInfo": "1.12.3",
+      "SPDXID": "SPDXRef-Package-libgcrypt",
+      "supplier": "Organization: Gentoo",
+      "downloadLocation": "NOASSERTION",
+      "externalRefs": [
+        {"referenceCategory": "PACKAGE-MANAGER", "referenceType": "purl", "referenceLocator": "pkg:gentoo/dev-libs/libgcrypt@1.12.3"}
+      ]
+    },
+    {
+      "name": "c-ares",
+      "versionInfo": "1.34.5",
+      "SPDXID": "SPDXRef-Package-c-ares",
+      "supplier": "Organization: Gentoo",
+      "downloadLocation": "NOASSERTION",
+      "externalRefs": [
+        {"referenceCategory": "PACKAGE-MANAGER", "referenceType": "purl", "referenceLocator": "pkg:gentoo/net-dns/c-ares@1.34.5"}
+      ]
+    },
+    {
+      "name": "jq",
+      "versionInfo": "1.7.1",
+      "SPDXID": "SPDXRef-Package-jq",
+      "supplier": "Organization: Gentoo",
+      "downloadLocation": "NOASSERTION",
+      "externalRefs": [
+        {"referenceCategory": "PACKAGE-MANAGER", "referenceType": "purl", "referenceLocator": "pkg:gentoo/app-misc/jq@1.7.1"}
+      ]
+    },
+    {
+      "name": "podman",
+      "versionInfo": "5.4.2",
+      "SPDXID": "SPDXRef-Package-podman",
+      "supplier": "Organization: Gentoo",
+      "downloadLocation": "NOASSERTION",
+      "externalRefs": [
+        {"referenceCategory": "PACKAGE-MANAGER", "referenceType": "purl", "referenceLocator": "pkg:gentoo/app-containers/podman@5.4.2"}
+      ]
+    },
+    {
+      "name": "go",
+      "versionInfo": "1.24.2",
+      "SPDXID": "SPDXRef-Package-go",
+      "supplier": "Organization: Gentoo",
+      "downloadLocation": "NOASSERTION",
+      "externalRefs": [
+        {"referenceCategory": "PACKAGE-MANAGER", "referenceType": "purl", "referenceLocator": "pkg:gentoo/dev-lang/go@1.24.2"}
+      ]
+    }
+  ]
+}

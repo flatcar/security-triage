@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "security-triage"
+version = "0.1.0"
+description = "Flatcar-specific vulnerability discovery and advisory cleanup automation"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Flatcar security automation" }]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+yaml = ["PyYAML>=6"]
+
+[project.scripts]
+security-triage = "security_triage.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["src"]

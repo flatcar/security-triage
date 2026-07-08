@@ -1,0 +1,54 @@
+{
+  "entries": [
+    {
+      "source": "gentoo",
+      "source_url": "https://bugs.gentoo.org/30001",
+      "entry_id": "gentoo-30001",
+      "title": "OpenSSL: certificate validation vulnerability",
+      "content": "Package: openssl\nCVE: CVE-2026-30001\nCVSS: 8.8\nAffected versions: < 3.2.4\nFixed in 3.2.4\nFlatcar ships this server package in the production Stable image.\nGentoo bug: https://bugs.gentoo.org/30001",
+      "published_at": "2026-04-29T00:10:00Z",
+      "updated_at": "2026-04-29T00:10:00Z",
+      "references": ["https://bugs.gentoo.org/30001", "https://openssl.example/advisory"]
+    },
+    {
+      "source": "gentoo",
+      "source_url": "https://bugs.gentoo.org/30002",
+      "entry_id": "gentoo-30002",
+      "title": "rust-openssl: new upstream CVE",
+      "content": "Package: rust-openssl\nCVE: CVE-2026-30002\nCVSS: 7.8\nFixed in 0.10.79\nFlatcar uses this package for relevant server components.\nGentoo bug: https://bugs.gentoo.org/30002",
+      "published_at": "2026-04-29T00:20:00Z",
+      "updated_at": "2026-04-29T00:20:00Z",
+      "references": ["https://bugs.gentoo.org/30002"]
+    },
+    {
+      "source": "oss_security",
+      "source_url": "https://www.openwall.com/lists/oss-security/2026/04/29/1",
+      "entry_id": "oss-2026-04-29-1",
+      "title": "Linux kernel: CVE-2026-30003",
+      "content": "Package: linux-kernel\nCVE: CVE-2026-30003\nCVSS: 9.1\nA Linux kernel vulnerability was fixed in a stable kernel release.",
+      "published_at": "2026-04-29T01:00:00Z",
+      "updated_at": "2026-04-29T01:00:00Z",
+      "references": ["https://kernel.example/stable"]
+    },
+    {
+      "source": "gentoo",
+      "source_url": "https://bugs.gentoo.org/30004",
+      "entry_id": "gentoo-30004",
+      "title": "GNOME Shell: desktop vulnerability",
+      "content": "Package: gnome-shell\nCVE: CVE-2026-30004\nCVSS: 6.1\nThis is a GNOME desktop shell issue and no Flatcar production/sysext/SDK evidence is present.",
+      "published_at": "2026-04-29T02:00:00Z",
+      "updated_at": "2026-04-29T02:00:00Z",
+      "references": ["https://bugs.gentoo.org/30004"]
+    },
+    {
+      "source": "oss_security",
+      "source_url": "https://www.openwall.com/lists/oss-security/2026/04/29/5",
+      "entry_id": "oss-2026-04-29-5",
+      "title": "npm package left-pad-plus vulnerability",
+      "content": "Package: left-pad-plus\nCVE: CVE-2026-30005\nCVSS: 7.5\nThis npm package is an application ecosystem package with no evidence that Flatcar ships or uses it.",
+      "published_at": "2026-04-29T03:00:00Z",
+      "updated_at": "2026-04-29T03:00:00Z",
+      "references": ["https://npm.example/advisory"]
+    }
+  ]
+}
