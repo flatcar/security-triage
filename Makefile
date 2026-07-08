@@ -1,4 +1,4 @@
-.PHONY: help install dev-install test lint format check build clean run
+.PHONY: help install dev-install dev setup test test-quick lint lint-fix format format-check type-check check fix build clean all ci
 .DEFAULT_GOAL := help
 
 help: ## 📋 Show this help message
