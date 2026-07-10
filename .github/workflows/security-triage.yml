@@ -1,15 +1,41 @@
 name: Flatcar Security Triage
 
+# Daily discovery + cleanup analysis using Microsoft Foundry through GitHub
+# OIDC. This workflow never mutates advisory issues directly: it only
+# produces diagnostic reports and creates human-gated review issue part(s).
+# Actual advisory mutations happen later, only when a maintainer closes a
+# review issue with reason "Completed" (see security-triage-apply.yml).
+#
+# Battle testing: SECURITY_TRIAGE_ADVISORY_REPO and SECURITY_TRIAGE_REVIEW_REPO
+# are both pinned to `${{ github.repository }}` (this repository). Moving this
+# workflow to the production repository later requires only configuration
+# changes, never business-logic changes -- see docs/github-actions-foundry-oidc.md.
+
 on:
+  schedule:
+    - cron: '0 6 * * *'
   workflow_dispatch:
+
+concurrency:
+  # Serialize daily runs so a new schedule tick can never race an
+  # in-progress review-issue creation sequence; never cancel an in-flight
+  # run partway through issue creation.
+  group: security-triage-daily-analysis
+  cancel-in-progress: false
 
 permissions:
   contents: read
-  issues: read
-  models: read
+  issues: write
+  id-token: write
+
+env:
+  # Pinned to this repository for battle testing. A future move to the
+  # production repository changes only these two values.
+  SECURITY_TRIAGE_ADVISORY_REPO: ${{ github.repository }}
+  SECURITY_TRIAGE_REVIEW_REPO: ${{ github.repository }}
 
 jobs:
-  read-only-analysis:
+  daily-analysis:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -32,24 +58,60 @@ jobs:
           restore-keys: |
             flatcar-prompt-cache-
 
+      # Branch-bound OIDC federated login: no client secret is created or
+      # stored. See docs/github-actions-foundry-oidc.md for one-time setup.
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # The runtime Foundry client never shells out to Azure CLI; this
+      # workflow step is the only place that bridges the OIDC-authenticated
+      # `az` session to a short-lived Cognitive Services bearer token.
+      - name: Obtain Microsoft Foundry access token
+        id: foundry-token
+        run: |
+          set -euo pipefail
+          TOKEN=$(az account get-access-token --resource https://cognitiveservices.azure.com/ --query accessToken -o tsv)
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      # Read-only: no --apply-actions / --enable-* mutation flag is passed,
+      # so this step can never create or edit an advisory issue directly.
       - name: Discovery
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          FOUNDRY_BEARER_TOKEN: ${{ steps.foundry-token.outputs.token }}
+          FOUNDRY_ENDPOINT: ${{ vars.FOUNDRY_ENDPOINT }}
+          FOUNDRY_DEPLOYMENT: ${{ vars.FOUNDRY_DEPLOYMENT }}
+          FOUNDRY_EXTRACTION_DEPLOYMENT: ${{ vars.FOUNDRY_EXTRACTION_DEPLOYMENT }}
+          FOUNDRY_API_VERSION: ${{ vars.FOUNDRY_API_VERSION }}
           FLATCAR_PROMPT_CACHE_DIR: .prompt-cache
         run: |
           security-triage discovery \
-            --model github \
+            --model foundry \
+            --advisory-repo "$SECURITY_TRIAGE_ADVISORY_REPO" \
             --output reports/discovery.json \
             --markdown-output reports/discovery.md \
             --debug-log reports/discovery-debug.jsonl
 
+      # Read-only: no --apply-actions / --enable-* mutation flag is passed,
+      # so this step can never comment on or close an advisory issue directly.
       - name: Cleanup
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          FOUNDRY_BEARER_TOKEN: ${{ steps.foundry-token.outputs.token }}
+          FOUNDRY_ENDPOINT: ${{ vars.FOUNDRY_ENDPOINT }}
+          FOUNDRY_DEPLOYMENT: ${{ vars.FOUNDRY_DEPLOYMENT }}
+          FOUNDRY_EXTRACTION_DEPLOYMENT: ${{ vars.FOUNDRY_EXTRACTION_DEPLOYMENT }}
+          FOUNDRY_API_VERSION: ${{ vars.FOUNDRY_API_VERSION }}
           FLATCAR_PROMPT_CACHE_DIR: .prompt-cache
         run: |
           security-triage cleanup \
-            --model github \
+            --model foundry \
+            --advisory-repo "$SECURITY_TRIAGE_ADVISORY_REPO" \
             --output reports/cleanup.json \
             --markdown-output reports/cleanup.md \
             --debug-log reports/cleanup-debug.jsonl
@@ -62,7 +124,33 @@ jobs:
           key: flatcar-prompt-cache-${{ github.run_id }}
 
       - name: Upload reports
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: security-triage-reports
+          name: security-triage-reports-${{ github.run_id }}
           path: reports/
+
+      # The only mutating step in this workflow: it creates (or, on a rerun
+      # of the same run, idempotently finds) the human-gated review issue
+      # part(s). It never mutates an advisory issue.
+      - name: Create review issue(s)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          security-triage review create \
+            --discovery-json reports/discovery.json \
+            --cleanup-json reports/cleanup.json \
+            --advisory-repo "$SECURITY_TRIAGE_ADVISORY_REPO" \
+            --review-repo "$SECURITY_TRIAGE_REVIEW_REPO" \
+            --run-id "${{ github.run_id }}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --commit-sha "${{ github.sha }}" \
+            --discovery-report-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --output reports/review-create.json
+
+      - name: Upload review creation summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-triage-review-create-${{ github.run_id }}
+          path: reports/review-create.json

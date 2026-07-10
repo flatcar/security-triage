@@ -33,6 +33,7 @@ class Issue:
     labels: list[str]
     html_url: str
     state: str = "open"
+    state_reason: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
 

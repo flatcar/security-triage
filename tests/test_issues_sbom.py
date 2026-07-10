@@ -1,10 +1,16 @@
 from pathlib import Path
 
+import pytest
+
+from security_triage import issues as issues_module
+from security_triage.http_utils import HTTPError
 from security_triage.issues import (
+    GitHubIssueClient,
     find_existing_issue_matches,
     load_issue_fixture,
     parse_issue_body,
 )
+from security_triage.rules import RepositoryValidationError, advisory_issue_query
 from security_triage.sbom import (
     compare_simple_versions,
     evaluate_fixed_version_requirements,
@@ -161,3 +167,225 @@ def test_or_style_alternatives_ambiguous_when_not_conclusive():
         ).result
         == "ambiguous"
     )
+
+
+def test_github_issue_client_validates_repo_on_construction():
+    with pytest.raises(RepositoryValidationError):
+        GitHubIssueClient(repo="not-a-valid-repo")
+
+
+def test_fetch_open_advisory_issues_defaults_to_the_configured_repo(monkeypatch):
+    captured_urls = []
+
+    def fake_fetch_json(url, token=None, accept="application/json"):
+        captured_urls.append(url)
+        return {"items": []}
+
+    monkeypatch.setattr(issues_module, "fetch_json", fake_fetch_json)
+    client = GitHubIssueClient(repo="flatcar/security-triage")
+
+    client.fetch_open_advisory_issues()
+
+    assert len(captured_urls) == 1
+    assert (
+        "flatcar%2Fsecurity-triage" in captured_urls[0]
+        or "flatcar/security-triage" in captured_urls[0]
+    )
+    assert "flatcar%2FFlatcar" not in captured_urls[0]
+
+
+def test_get_issue_returns_state_reason(monkeypatch):
+    def fake_fetch_json(url, token=None, accept="application/json"):
+        assert url.endswith("/repos/flatcar/security-triage/issues/42")
+        return {
+            "number": 42,
+            "title": "t",
+            "body": "b",
+            "labels": [],
+            "html_url": "u",
+            "state": "closed",
+            "state_reason": "completed",
+        }
+
+    monkeypatch.setattr(issues_module, "fetch_json", fake_fetch_json)
+    client = GitHubIssueClient(repo="flatcar/security-triage")
+
+    issue = client.get_issue(42)
+
+    assert issue.number == 42
+    assert issue.state == "closed"
+    assert issue.state_reason == "completed"
+
+
+def test_list_issues_by_label_paginates_and_skips_pull_requests(monkeypatch):
+    pages = [
+        [
+            {
+                "number": i,
+                "title": "t",
+                "body": "",
+                "labels": [],
+                "html_url": "u",
+                "state": "open",
+            }
+            for i in range(100)
+        ],
+        [
+            {
+                "number": 200,
+                "title": "t",
+                "body": "",
+                "labels": [],
+                "html_url": "u",
+                "state": "open",
+            },
+            {
+                "number": 201,
+                "title": "pr",
+                "body": "",
+                "labels": [],
+                "html_url": "u",
+                "state": "open",
+                "pull_request": {},
+            },
+        ],
+    ]
+
+    def fake_fetch_json(url, token=None, accept="application/json"):
+        assert "labels=security-triage%2Freview" in url
+        assert "state=all" in url
+        page_number = int(url.split("page=")[-1])
+        return pages[page_number - 1]
+
+    monkeypatch.setattr(issues_module, "fetch_json", fake_fetch_json)
+    client = GitHubIssueClient(repo="flatcar/security-triage")
+
+    result = client.list_issues_by_label("security-triage/review")
+
+    assert len(result) == 101
+    assert all(issue.number != 201 for issue in result)
+
+
+def test_list_comments_paginates(monkeypatch):
+    pages = [
+        [{"id": i, "body": f"comment {i}"} for i in range(100)],
+        [{"id": 200, "body": "last"}],
+    ]
+
+    def fake_fetch_json(url, token=None, accept="application/json"):
+        page_number = int(url.split("page=")[-1])
+        return pages[page_number - 1]
+
+    monkeypatch.setattr(issues_module, "fetch_json", fake_fetch_json)
+    client = GitHubIssueClient(repo="flatcar/security-triage")
+
+    comments = client.list_comments(7)
+
+    assert len(comments) == 101
+    assert comments[-1]["body"] == "last"
+
+
+def test_ensure_label_exists_skips_creation_when_label_already_exists(monkeypatch):
+    def fake_fetch_json(url, token=None, accept="application/json"):
+        return {"name": "security-triage/review"}
+
+    def boom_request_json(self, method, path, payload):
+        raise AssertionError("must not attempt to create a label that already exists")
+
+    monkeypatch.setattr(issues_module, "fetch_json", fake_fetch_json)
+    monkeypatch.setattr(GitHubIssueClient, "_request_json", boom_request_json)
+    client = GitHubIssueClient(repo="flatcar/security-triage")
+
+    client.ensure_label_exists("security-triage/review")
+
+
+def test_ensure_label_exists_creates_missing_label(monkeypatch):
+    created = {}
+
+    def fake_fetch_json(url, token=None, accept="application/json"):
+        raise HTTPError("GitHub API HTTP 404 for /repos/x/labels/y: not found")
+
+    def fake_request_json(self, method, path, payload):
+        created["method"] = method
+        created["path"] = path
+        created["payload"] = payload
+        return {"name": payload["name"]}
+
+    monkeypatch.setattr(issues_module, "fetch_json", fake_fetch_json)
+    monkeypatch.setattr(GitHubIssueClient, "_request_json", fake_request_json)
+    client = GitHubIssueClient(repo="flatcar/security-triage")
+
+    client.ensure_label_exists(
+        "security-triage/review", color="5319e7", description="d"
+    )
+
+    assert created["method"] == "POST"
+    assert created["path"] == "/repos/flatcar/security-triage/labels"
+    assert created["payload"] == {
+        "name": "security-triage/review",
+        "color": "5319e7",
+        "description": "d",
+    }
+
+
+def test_ensure_label_exists_tolerates_concurrent_creation_race(monkeypatch):
+    def fake_fetch_json(url, token=None, accept="application/json"):
+        raise HTTPError("GitHub API HTTP 404 for /repos/x/labels/y: not found")
+
+    def fake_request_json(self, method, path, payload):
+        raise HTTPError("GitHub API HTTP 422 for /repos/x/labels: already_exists")
+
+    monkeypatch.setattr(issues_module, "fetch_json", fake_fetch_json)
+    monkeypatch.setattr(GitHubIssueClient, "_request_json", fake_request_json)
+    client = GitHubIssueClient(repo="flatcar/security-triage")
+
+    client.ensure_label_exists("security-triage/review")
+
+
+def test_ensure_label_exists_reraises_unexpected_errors(monkeypatch):
+    def fake_fetch_json(url, token=None, accept="application/json"):
+        raise HTTPError("HTTP 500 for /repos/x/labels/y: server error")
+
+    monkeypatch.setattr(issues_module, "fetch_json", fake_fetch_json)
+    client = GitHubIssueClient(repo="flatcar/security-triage")
+
+    with pytest.raises(HTTPError, match="500"):
+        client.ensure_label_exists("security-triage/review")
+
+
+def test_add_labels_posts_expected_payload(monkeypatch):
+    captured = {}
+
+    def fake_request_json(self, method, path, payload):
+        captured["method"] = method
+        captured["path"] = path
+        captured["payload"] = payload
+        return {}
+
+    monkeypatch.setattr(GitHubIssueClient, "_request_json", fake_request_json)
+    client = GitHubIssueClient(repo="flatcar/security-triage")
+
+    client.add_labels(5, ["security-triage/review-applied"])
+
+    assert captured == {
+        "method": "POST",
+        "path": "/repos/flatcar/security-triage/issues/5/labels",
+        "payload": {"labels": ["security-triage/review-applied"]},
+    }
+
+
+def test_advisory_issue_query_matches_client_default(monkeypatch):
+    captured_urls = []
+
+    def fake_fetch_json(url, token=None, accept="application/json"):
+        captured_urls.append(url)
+        return {"items": []}
+
+    monkeypatch.setattr(issues_module, "fetch_json", fake_fetch_json)
+    client = GitHubIssueClient(repo="flatcar/security-triage")
+    client.fetch_open_advisory_issues()
+
+    import urllib.parse
+
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(captured_urls[0]).query)["q"][0]
+    assert query == advisory_issue_query("flatcar/security-triage")

@@ -7,9 +7,8 @@ SCHEMA_VERSION = "1.0"
 PROMPT_VERSION = "security-triage-2026-04-29"
 TARGET_REPO = "flatcar/Flatcar"
 FLATCAR_PRODUCTION_SBOM_URL = "https://alpha.release.flatcar-linux.net/amd64-usr/current/flatcar_production_image_sbom.json"
-ADVISORY_ISSUE_QUERY = (
-    "repo:flatcar/Flatcar is:issue is:open label:advisory label:security"
-)
+REVIEW_LABEL = "security-triage/review"
+REVIEW_APPLIED_LABEL = "security-triage/review-applied"
 
 REQUIRED_LABELS = {"advisory", "security"}
 ALLOWED_LABELS = {
@@ -72,10 +71,98 @@ _KERNEL_RE = re.compile(
     r"\b(linux|linux-kernel|kernel|sys-kernel|kernel-cve)\b", re.IGNORECASE
 )
 _STRIKETHROUGH_RE = re.compile(r"(?:~~.*?~~|~[^~]*~)", re.DOTALL)
+_GENTOO_REF_MARKERS = ("bugs.gentoo.org", "glsa.gentoo.org", "security.gentoo.org/glsa")
+_OWNER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$")
+_REPO_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_REPO_FORBIDDEN_CHARS = frozenset(" \t\r\n?#@\\\"'<>|*")
 
 
 class SchemaValidationError(ValueError):
     pass
+
+
+class RepositoryValidationError(SchemaValidationError):
+    """Raised when a configured GitHub repository identifier is missing or unsafe.
+
+    Target repositories always come from trusted CLI arguments, environment
+    variables, or workflow configuration -- never from editable issue prose --
+    but every value is still validated defensively before use in an API path
+    or search query.
+    """
+
+
+def validate_repo_name(value: str | None) -> str:
+    """Validate and normalize a GitHub ``owner/repo`` identifier.
+
+    Rejects empty values, control characters, whitespace, and query/fragment
+    style characters, and requires exactly one ``/``-delimited owner/repo pair
+    using the character set GitHub allows in login and repository slugs.
+    """
+    text = (value or "").strip()
+    if not text:
+        raise RepositoryValidationError("Repository name must not be empty")
+    if _CONTROL_CHARS_RE.search(text) or any(
+        char in _REPO_FORBIDDEN_CHARS for char in text
+    ):
+        raise RepositoryValidationError(
+            f"Repository name contains invalid characters: {value!r}"
+        )
+    parts = text.split("/")
+    if len(parts) != 2:
+        raise RepositoryValidationError(
+            f"Repository name must be 'owner/repo': {value!r}"
+        )
+    owner, repo = parts
+    if not owner or len(owner) > 39 or not _OWNER_RE.match(owner):
+        raise RepositoryValidationError(f"Invalid repository owner: {owner!r}")
+    if (
+        not repo
+        or len(repo) > 100
+        or repo in {".", ".."}
+        or not _REPO_NAME_RE.match(repo)
+    ):
+        raise RepositoryValidationError(f"Invalid repository name: {repo!r}")
+    return f"{owner}/{repo}"
+
+
+def advisory_issue_query(repo: str, *, exclude_review_label: bool = True) -> str:
+    """Build the advisory-issue search query for ``repo``.
+
+    Parameterized so battle testing in ``flatcar/security-triage`` and a later
+    production rollout to ``flatcar/Flatcar`` only change configuration, never
+    the query-building logic. The dedicated review label is excluded as
+    defense in depth even though review issues never receive the ``advisory``
+    or ``security`` labels.
+    """
+    validated = validate_repo_name(repo)
+    query = f"repo:{validated} is:issue is:open label:advisory label:security"
+    if exclude_review_label:
+        query += f' -label:"{REVIEW_LABEL}"'
+    return query
+
+
+def review_issue_label_query(repo: str) -> str:
+    """Build a diagnostic search query for review issues in any state.
+
+    The review pipeline's own duplicate/idempotency checks use the Issues
+    List API (label filter with ``state=all``) instead of this search query
+    because GitHub's search index is only eventually consistent, and a rerun
+    of the same Actions run needs an immediately consistent duplicate check.
+    """
+    validated = validate_repo_name(repo)
+    return f'repo:{validated} is:issue label:"{REVIEW_LABEL}"'
+
+
+def is_gentoo_reference(value: Any) -> bool:
+    """Return True when ``value`` looks like a real Gentoo Bugzilla/GLSA reference.
+
+    Used to keep ``refmap.gentoo`` restricted to genuine Gentoo URLs instead of
+    an arbitrary upstream link that untrusted source text might suggest.
+    """
+    text = str(value or "").strip()
+    if not text or text.upper() in {"TBD", "N/A", "NONE"}:
+        return False
+    return any(marker in text for marker in _GENTOO_REF_MARKERS)
 
 
 def sanitize_single_line(value: str | None) -> str:
@@ -572,6 +659,12 @@ def validate_cleanup_document(document: dict[str, Any]) -> None:
             raise SchemaValidationError(
                 f"Invalid cleanup recommendation {record['recommended_action']}"
             )
+
+
+#: Backward-compatible default query for ``TARGET_REPO``. New code should call
+#: ``advisory_issue_query(repo)`` with an explicit, configured repository
+#: instead of relying on this module-level constant.
+ADVISORY_ISSUE_QUERY = advisory_issue_query(TARGET_REPO)
 
 
 def cleanup_comment_body(

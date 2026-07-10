@@ -12,11 +12,12 @@ from .http_utils import HTTPError, fetch_json, open_request
 from .io_utils import load_structured_file
 from .records import Issue, ParsedIssue
 from .rules import (
-    ADVISORY_ISSUE_QUERY,
     active_markdown_text,
+    advisory_issue_query,
     extract_cves,
     normalize_name,
     parse_cvss_scores,
+    validate_repo_name,
 )
 
 _FIELD_RE = re.compile(
@@ -32,13 +33,14 @@ class GitHubConfigError(RuntimeError):
 
 class GitHubIssueClient:
     def __init__(self, repo: str = "flatcar/Flatcar", token: str | None = None) -> None:
-        self.repo = repo
+        self.repo = validate_repo_name(repo)
         self.token = token or os.getenv("GITHUB_TOKEN")
         self.api_base = "https://api.github.com"
 
-    def fetch_open_advisory_issues(
-        self, query: str = ADVISORY_ISSUE_QUERY
-    ) -> list[Issue]:
+    def fetch_open_advisory_issues(self, query: str | None = None) -> list[Issue]:
+        return self._search_issues(query or advisory_issue_query(self.repo))
+
+    def _search_issues(self, query: str) -> list[Issue]:
         issues: list[Issue] = []
         page = 1
         while True:
@@ -58,6 +60,105 @@ class GitHubIssueClient:
                 break
             page += 1
         return issues
+
+    def get_issue(self, issue_number: int) -> Issue:
+        """Fetch a single issue fresh from the API.
+
+        Used by the review-apply path instead of trusting stale webhook
+        payload fields or previously cached issue state.
+        """
+        payload = fetch_json(
+            f"{self.api_base}/repos/{self.repo}/issues/{issue_number}",
+            token=self.token,
+            accept="application/vnd.github+json",
+        )
+        return issue_from_api(payload)
+
+    def list_issues_by_label(self, label: str, state: str = "all") -> list[Issue]:
+        """List issues carrying ``label`` using the Issues List API.
+
+        The Issues List endpoint is immediately consistent (unlike the Search
+        API's eventually-consistent index), which makes it the safe choice for
+        same-run idempotency and duplicate checks that must observe an issue
+        created moments earlier in the same workflow run.
+        """
+        issues: list[Issue] = []
+        page = 1
+        while True:
+            encoded = urllib.parse.urlencode(
+                {"labels": label, "state": state, "per_page": "100", "page": str(page)}
+            )
+            payload = fetch_json(
+                f"{self.api_base}/repos/{self.repo}/issues?{encoded}",
+                token=self.token,
+                accept="application/vnd.github+json",
+            )
+            if not isinstance(payload, list):
+                break
+            issues.extend(
+                issue_from_api(item) for item in payload if "pull_request" not in item
+            )
+            if len(payload) < 100:
+                break
+            page += 1
+        return issues
+
+    def list_comments(self, issue_number: int) -> list[dict[str, Any]]:
+        comments: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            encoded = urllib.parse.urlencode({"per_page": "100", "page": str(page)})
+            payload = fetch_json(
+                f"{self.api_base}/repos/{self.repo}/issues/{issue_number}/comments?{encoded}",
+                token=self.token,
+                accept="application/vnd.github+json",
+            )
+            if not isinstance(payload, list):
+                break
+            comments.extend(payload)
+            if len(payload) < 100:
+                break
+            page += 1
+        return comments
+
+    def ensure_label_exists(
+        self, name: str, color: str = "6f42c1", description: str = ""
+    ) -> None:
+        """Create ``name`` as a repository label if it does not already exist.
+
+        Never adds ``advisory``/``security`` semantics; callers choose the
+        label name, and this only guarantees the label exists before it is
+        attached to an issue.
+        """
+        encoded_name = urllib.parse.quote(name, safe="")
+        try:
+            fetch_json(
+                f"{self.api_base}/repos/{self.repo}/labels/{encoded_name}",
+                token=self.token,
+                accept="application/vnd.github+json",
+            )
+            return
+        except HTTPError as exc:
+            if "HTTP 404" not in str(exc):
+                raise
+        try:
+            self._request_json(
+                "POST",
+                f"/repos/{self.repo}/labels",
+                {"name": name, "color": color, "description": description},
+            )
+        except HTTPError as exc:
+            # A concurrent run may have created the label between our GET and
+            # POST; GitHub reports that race as 422 Unprocessable Entity.
+            if "HTTP 422" not in str(exc):
+                raise
+
+    def add_labels(self, issue_number: int, labels: list[str]) -> dict[str, Any]:
+        return self._request_json(
+            "POST",
+            f"/repos/{self.repo}/issues/{issue_number}/labels",
+            {"labels": labels},
+        )
 
     def create_issue(self, title: str, body: str, labels: list[str]) -> dict[str, Any]:
         return self._request_json(
@@ -101,12 +202,15 @@ class GitHubIssueClient:
         )
         try:
             with open_request(request, timeout=30) as response:
-                return json.loads(response.read().decode("utf-8"))  # type: ignore[no-any-return]
+                parsed: object = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             raise HTTPError(
                 f"GitHub API HTTP {exc.code} for {path}: {body[:500]}"
             ) from exc
+        if not isinstance(parsed, dict):
+            raise HTTPError(f"GitHub API returned unexpected JSON payload for {path}")
+        return parsed
 
 
 def load_issue_fixture(path: str) -> list[Issue]:
@@ -121,6 +225,7 @@ def load_issue_fixture(path: str) -> list[Issue]:
 
 def issue_from_api(item: dict[str, Any]) -> Issue:
     labels = _labels_from_api(item.get("labels", []))
+    state_reason = item.get("state_reason")
     return Issue(
         number=int(item.get("number", 0)),
         title=str(item.get("title") or ""),
@@ -128,6 +233,7 @@ def issue_from_api(item: dict[str, Any]) -> Issue:
         labels=labels,
         html_url=str(item.get("html_url") or item.get("url") or ""),
         state=str(item.get("state") or "open"),
+        state_reason=str(state_reason) if state_reason else None,
         raw=item,
     )
 
