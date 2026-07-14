@@ -71,7 +71,6 @@ _KERNEL_RE = re.compile(
     r"\b(linux|linux-kernel|kernel|sys-kernel|kernel-cve)\b", re.IGNORECASE
 )
 _STRIKETHROUGH_RE = re.compile(r"(?:~~.*?~~|~[^~]*~)", re.DOTALL)
-_GENTOO_REF_MARKERS = ("bugs.gentoo.org", "glsa.gentoo.org", "security.gentoo.org/glsa")
 _OWNER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$")
 _REPO_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _REPO_FORBIDDEN_CHARS = frozenset(" \t\r\n?#@\\\"'<>|*")
