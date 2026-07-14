@@ -6,7 +6,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any
+from typing import Any, cast
 
 from .http_utils import HTTPError, fetch_json, open_request
 from .io_utils import load_structured_file
@@ -153,38 +153,57 @@ class GitHubIssueClient:
             if "HTTP 422" not in str(exc):
                 raise
 
-    def add_labels(self, issue_number: int, labels: list[str]) -> dict[str, Any]:
-        return self._request_json(
-            "POST",
-            f"/repos/{self.repo}/issues/{issue_number}/labels",
-            {"labels": labels},
+    def add_labels(self, issue_number: int, labels: list[str]) -> list[dict[str, Any]]:
+        return cast(
+            list[dict[str, Any]],
+            self._request_json(
+                "POST",
+                f"/repos/{self.repo}/issues/{issue_number}/labels",
+                {"labels": labels},
+            ),
         )
 
     def create_issue(self, title: str, body: str, labels: list[str]) -> dict[str, Any]:
-        return self._request_json(
-            "POST",
-            f"/repos/{self.repo}/issues",
-            {"title": title, "body": body, "labels": labels},
+        return cast(
+            dict[str, Any],
+            self._request_json(
+                "POST",
+                f"/repos/{self.repo}/issues",
+                {"title": title, "body": body, "labels": labels},
+            ),
         )
 
     def update_issue_body(self, issue_number: int, body: str) -> dict[str, Any]:
-        return self._request_json(
-            "PATCH", f"/repos/{self.repo}/issues/{issue_number}", {"body": body}
+        return cast(
+            dict[str, Any],
+            self._request_json(
+                "PATCH", f"/repos/{self.repo}/issues/{issue_number}", {"body": body}
+            ),
         )
 
     def post_comment(self, issue_number: int, body: str) -> dict[str, Any]:
-        return self._request_json(
-            "POST", f"/repos/{self.repo}/issues/{issue_number}/comments", {"body": body}
+        return cast(
+            dict[str, Any],
+            self._request_json(
+                "POST",
+                f"/repos/{self.repo}/issues/{issue_number}/comments",
+                {"body": body},
+            ),
         )
 
     def close_issue(self, issue_number: int) -> dict[str, Any]:
-        return self._request_json(
-            "PATCH", f"/repos/{self.repo}/issues/{issue_number}", {"state": "closed"}
+        return cast(
+            dict[str, Any],
+            self._request_json(
+                "PATCH",
+                f"/repos/{self.repo}/issues/{issue_number}",
+                {"state": "closed"},
+            ),
         )
 
     def _request_json(
         self, method: str, path: str, payload: dict[str, Any]
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | list[Any]:
         if not self.token:
             raise GitHubConfigError(
                 "GITHUB_TOKEN is required for GitHub write operations"
@@ -210,7 +229,7 @@ class GitHubIssueClient:
             ) from exc
         if not isinstance(parsed, (dict, list)):
             raise HTTPError(f"GitHub API returned unexpected JSON payload for {path}")
-        return parsed  # type: ignore[return-value]
+        return parsed
 
 
 def load_issue_fixture(path: str) -> list[Issue]:
