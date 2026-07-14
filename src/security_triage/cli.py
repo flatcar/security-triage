@@ -92,7 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common_io_args(discovery, "reports/discovery.json")
     _add_model_args(discovery)
-    _add_advisory_repo_arg(discovery, "read")
+    _add_advisory_repo_arg(discovery, "read (output is fed to `review create` for human-gated apply)")
     discovery.add_argument(
         "--source-fixture", help="JSON/YAML fixture containing upstream source entries"
     )
@@ -133,21 +133,6 @@ def build_parser() -> argparse.ArgumentParser:
     discovery.add_argument(
         "--rustsec-cache-dir",
         help="Directory to cache fetched RustSec advisory Markdown between runs",
-    )
-    discovery.add_argument(
-        "--apply-actions",
-        action="store_true",
-        help="Apply guarded GitHub actions after producing validated records",
-    )
-    discovery.add_argument(
-        "--enable-create-issues",
-        action="store_true",
-        help="Allow creating new GitHub issues when --apply-actions is set",
-    )
-    discovery.add_argument(
-        "--enable-update-issues",
-        action="store_true",
-        help="Allow commenting on existing issues with recommended updates when --apply-actions is set",
     )
 
     cleanup = subparsers.add_parser(
@@ -436,20 +421,6 @@ def run_discovery_command(args: argparse.Namespace) -> int:
     if args.markdown_output:
         progress.info(f"Writing Markdown report: {args.markdown_output}")
         write_markdown(args.markdown_output, render_discovery_markdown(document))
-    if args.apply_actions:
-        progress.info("Applying guarded GitHub discovery actions")
-        flags = ActionFlags(
-            create_issues=args.enable_create_issues,
-            update_existing_issues=args.enable_update_issues,
-        )
-        runner = GitHubActionRunner(
-            GitHubIssueClient(repo=advisory_repo), flags, debug_logger
-        )
-        action_results = runner.apply_discovery(document)
-        debug_logger.log("discovery_action_results", results=action_results)
-        progress.info(
-            f"Completed {len(action_results)} guarded GitHub action result(s)"
-        )
     progress.info("Discovery complete")
     print(f"wrote {args.output}")
     if args.markdown_output:
