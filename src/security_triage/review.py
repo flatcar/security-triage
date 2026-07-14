@@ -1018,7 +1018,7 @@ def _cleanup_manual_group(record: dict[str, Any]) -> DecisionGroup:
 # --- Rendering ---------------------------------------------------------------
 
 _HTML_COMMENT_OPEN_RE = re.compile(r"<!--")
-_HTML_COMMENT_CLOSE_RE = re.compile(r"-->")
+_HTML_COMMENT_CLOSE_RE = re.compile(r"--!?>")
 
 
 def _neutralize_html_comments(text: str) -> str:
