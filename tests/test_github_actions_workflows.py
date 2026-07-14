@@ -13,7 +13,9 @@ resolving to this repository rather than a hard-coded `flatcar/Flatcar`.
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 
@@ -148,8 +150,18 @@ def test_daily_workflow_repository_configuration_is_parameterized_to_current_rep
 def test_daily_workflow_foundry_bearer_token_is_masked_and_scoped():
     raw_text = DAILY_WORKFLOW_PATH.read_text(encoding="utf-8")
     assert "::add-mask::" in raw_text
-    assert "cognitiveservices.azure.com" in raw_text
     assert "FOUNDRY_BEARER_TOKEN" in raw_text
+
+    url_candidates = re.findall(r"https?://[^\s\"'<>]+", raw_text)
+    hosts = {
+        (urlparse(candidate).hostname or "").lower()
+        for candidate in url_candidates
+    }
+    assert any(
+        host == "cognitiveservices.azure.com"
+        or host.endswith(".cognitiveservices.azure.com")
+        for host in hosts
+    )
 
 
 # --- Apply workflow -------------------------------------------------------------

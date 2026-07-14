@@ -208,9 +208,9 @@ class GitHubIssueClient:
             raise HTTPError(
                 f"GitHub API HTTP {exc.code} for {path}: {body[:500]}"
             ) from exc
-        if not isinstance(parsed, dict):
+        if not isinstance(parsed, (dict, list)):
             raise HTTPError(f"GitHub API returned unexpected JSON payload for {path}")
-        return parsed
+        return parsed  # type: ignore[return-value]
 
 
 def load_issue_fixture(path: str) -> list[Issue]:

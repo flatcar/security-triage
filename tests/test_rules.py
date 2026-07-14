@@ -147,12 +147,10 @@ def test_review_issue_label_query_uses_review_label():
         ("https://glsa.gentoo.org/glsa-202601-01", True),
         (
             "https://evil.example/bugs.gentoo.org",
-            True,
+            False,
         ),
-        # substring match is intentionally permissive; real hosts always
-        # contain the marker
+        # Non-Gentoo hosts must be rejected even if the URL contains a marker substring.
         ("https://example.com/not-gentoo", False),
-        ("TBD", False),
         ("n/a", False),
         ("", False),
         (None, False),

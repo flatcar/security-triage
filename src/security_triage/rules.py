@@ -162,8 +162,21 @@ def is_gentoo_reference(value: Any) -> bool:
     text = str(value or "").strip()
     if not text or text.upper() in {"TBD", "N/A", "NONE"}:
         return False
-    return any(marker in text for marker in _GENTOO_REF_MARKERS)
 
+    if not (text.startswith("https://") or text.startswith("http://")):
+        return False
+
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(text)
+    host = (parts.hostname or "").lower()
+    path = parts.path or ""
+
+    if host in {"bugs.gentoo.org", "glsa.gentoo.org"}:
+        return True
+    if host == "security.gentoo.org" and path.startswith("/glsa/"):
+        return True
+    return False
 
 def sanitize_single_line(value: str | None) -> str:
     """Collapse control characters (newlines, tabs, etc.) to single spaces.
