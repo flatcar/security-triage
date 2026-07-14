@@ -92,7 +92,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common_io_args(discovery, "reports/discovery.json")
     _add_model_args(discovery)
-    _add_advisory_repo_arg(discovery, "read (output is fed to `review create` for human-gated apply)")
+    _add_advisory_repo_arg(
+        discovery, "read (output is fed to `review create` for human-gated apply)"
+    )
     discovery.add_argument(
         "--source-fixture", help="JSON/YAML fixture containing upstream source entries"
     )
