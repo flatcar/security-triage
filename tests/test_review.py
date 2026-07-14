@@ -89,13 +89,13 @@ class FakeGitHubIssueClient:
     ) -> None:
         return None
 
-    def add_labels(self, issue_number: int, labels: list[str]) -> dict[str, Any]:
+    def add_labels(self, issue_number: int, labels: list[str]) -> list[dict[str, Any]]:
         item = self._issues[issue_number]
         existing = {entry["name"] for entry in item["labels"]}
         for label in labels:
             if label not in existing:
                 item["labels"].append({"name": label})
-        return {"number": issue_number}
+        return list(item["labels"])
 
     def create_issue(self, title: str, body: str, labels: list[str]) -> dict[str, Any]:
         number = self._next_number
