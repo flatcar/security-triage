@@ -12,12 +12,14 @@ resolving to this repository rather than a hard-coded `flatcar/Flatcar`.
 
 from __future__ import annotations
 
-from pathlib import Path
 import re
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-import yaml
+import pytest
+
+yaml = pytest.importorskip("yaml")
 
 WORKFLOWS_DIR = Path(__file__).parent.parent / ".github" / "workflows"
 DAILY_WORKFLOW_PATH = WORKFLOWS_DIR / "security-triage.yml"
@@ -33,7 +35,7 @@ def _triggers(document: dict[str, Any]) -> dict[str, Any]:
     # PyYAML's default (YAML 1.1) resolver parses the unquoted `on:` mapping
     # key as the boolean True, which is how every workflow in this repository
     # (and GitHub's own examples) writes the key.
-    triggers = document.get("on", document.get(True))
+    triggers = document.get("on", document.get(True))  # type: ignore[call-overload]
     assert triggers is not None, "workflow must declare an 'on:' trigger section"
     return triggers
 
@@ -154,8 +156,7 @@ def test_daily_workflow_foundry_bearer_token_is_masked_and_scoped():
 
     url_candidates = re.findall(r"https?://[^\s\"'<>]+", raw_text)
     hosts = {
-        (urlparse(candidate).hostname or "").lower()
-        for candidate in url_candidates
+        (urlparse(candidate).hostname or "").lower() for candidate in url_candidates
     }
     assert any(
         host == "cognitiveservices.azure.com"

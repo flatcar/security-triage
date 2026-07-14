@@ -214,6 +214,10 @@ def test_review_render_requires_explicit_repos_with_no_flatcar_flatcar_default(
 ):
     monkeypatch.delenv("SECURITY_TRIAGE_ADVISORY_REPO", raising=False)
     monkeypatch.delenv("SECURITY_TRIAGE_REVIEW_REPO", raising=False)
+    # Isolate from any real `.env` file in the repository root: `main()` calls
+    # `load_dotenv()` with the default relative `.env` path, which must not
+    # repopulate the two variables this test just deleted.
+    monkeypatch.chdir(tmp_path)
     result = main(
         ["review", "render", "--quiet", "--output-dir", str(tmp_path / "out")]
     )

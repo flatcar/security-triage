@@ -178,6 +178,7 @@ def is_gentoo_reference(value: Any) -> bool:
         return True
     return False
 
+
 def sanitize_single_line(value: str | None) -> str:
     """Collapse control characters (newlines, tabs, etc.) to single spaces.
 
