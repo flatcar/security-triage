@@ -35,13 +35,11 @@ The repository/project migration target is `flatcar/security-triage`, but the ad
 
 ## Human-Gated Review and Apply Workflow
 
-A `security-triage review` command group adds an optional, human-gated layer in front of direct advisory mutation. It does not change the advisory issue style, labels, or cleanup rules below -- it only decides *when* and *whether* a maintainer-approved version of those exact changes is applied.
+A `security-triage review` command group provides the only supported path for mutating advisory issues from automated analysis. Discovery/cleanup produce read-only reports; a maintainer reviews the generated review issue(s) and, when satisfied, closes the review issue as **Completed** to apply only the checked, conflict-free actions.
 
-- `security-triage review create --discovery-json ... --cleanup-json ...` renders one or more review issues (label `security-triage/review`, never `advisory`/`security`) from already-produced discovery/cleanup JSON documents. Each decision group shows evidence, the exact proposed issue/update/comment, and task-list checkboxes carrying a hidden machine-readable action ID. Creation is idempotent per GitHub Actions run (`--run-id`); a new scheduled run still creates a fresh batch even if earlier review issues remain open.
-- `security-triage review render` renders the exact same content to local Markdown file(s) instead of calling GitHub -- a dry run with no token, no network call, and no mutation. Use it to preview a batch before creating it.
-- `security-triage review apply --issue-number ...` re-fetches the review issue fresh and applies only checked, conflict-free, schema-valid actions when the issue's close reason is exactly `completed`. Any other close reason (including `not_planned`, or an already-applied issue reopened and closed again) makes zero GitHub API calls. Applied mutations still go through the same guarded `GitHubActionRunner`, the same `--enable-*` flags, and the same additive removal guard as the direct `--apply-actions` path.
-
-The daily scheduled workflow (`.github/workflows/security-triage.yml`) runs discovery/cleanup read-only via Microsoft Foundry (OIDC, no stored secret) and calls `review create`; it never calls `--apply-actions` directly. `.github/workflows/security-triage-apply.yml` reacts only to `issues: closed` and calls `review apply`; it never calls Foundry/Azure or reruns analysis. See `docs/github-actions-foundry-oidc.md` for the one-time Azure setup and `README.md` for CLI examples.
+- `security-triage review create --discovery-json ... --cleanup-json ...` renders one or more review issues (label `security-triage/review`, never `advisory`/`security`) from already-produced discovery/cleanup documents.
+- `security-triage review render` writes the exact would-be review issue Markdown to local files (dry run; no token, no network).
+- `security-triage review apply --issue-number ...` re-fetches the review issue fresh and applies only checked, conflict-free, schema-valid actions when the close reason is exactly `completed`, and only when the corresponding `--enable-*` mutation flags are set.
 
 Battle testing is confined to `flatcar/security-triage` (`SECURITY_TRIAGE_ADVISORY_REPO`/`SECURITY_TRIAGE_REVIEW_REPO` both pinned to `${{ github.repository }}`); do not point either workflow at `flatcar/Flatcar` until the scheduled run has operated safely for several days and a maintainer explicitly decides to move it.
 
