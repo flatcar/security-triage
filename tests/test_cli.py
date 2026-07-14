@@ -11,6 +11,41 @@ from security_triage.issues import issue_from_api
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+# --- Parser: direct-mutation flags must not exist on discovery or cleanup -----
+
+
+def test_discovery_parser_rejects_apply_actions():
+    """discovery must never accept --apply-actions; direct writes are banned."""
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["discovery", "--apply-actions"])
+
+
+def test_discovery_parser_rejects_enable_create_issues():
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["discovery", "--enable-create-issues"])
+
+
+def test_discovery_parser_rejects_enable_update_issues():
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["discovery", "--enable-update-issues"])
+
+
+def test_cleanup_parser_rejects_apply_actions():
+    """cleanup must never accept --apply-actions; direct writes are banned."""
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["cleanup", "--apply-actions"])
+
+
+def test_cleanup_parser_rejects_enable_post_cleanup_comments():
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["cleanup", "--enable-post-cleanup-comments"])
+
+
+def test_cleanup_parser_rejects_enable_close_issues():
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["cleanup", "--enable-close-issues"])
+
+
 def test_discovery_default_window_days_is_seven():
     args = build_parser().parse_args(["discovery"])
     assert args.window_days == 7

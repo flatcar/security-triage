@@ -35,11 +35,11 @@ The repository/project migration target is `flatcar/security-triage`, but the ad
 
 ## Human-Gated Review and Apply Workflow
 
-A `security-triage review` command group provides the only supported path for mutating advisory issues from automated analysis. Discovery/cleanup produce read-only reports; a maintainer reviews the generated review issue(s) and, when satisfied, closes the review issue as **Completed** to apply only the checked, conflict-free actions.
+A `security-triage review` command group provides the **only** supported path for mutating advisory issues from automated analysis. `discovery` and `cleanup` are strictly read-only: they produce reports and never accept `--apply-actions` or any direct mutation flag. A maintainer reviews the generated review issue(s) and, when satisfied, closes the review issue as **Completed** to apply only the checked, conflict-free actions.
 
 - `security-triage review create --discovery-json ... --cleanup-json ...` renders one or more review issues (label `security-triage/review`, never `advisory`/`security`) from already-produced discovery/cleanup documents.
 - `security-triage review render` writes the exact would-be review issue Markdown to local files (dry run; no token, no network).
-- `security-triage review apply --issue-number ...` re-fetches the review issue fresh and applies only checked, conflict-free, schema-valid actions when the close reason is exactly `completed`, and only when the corresponding `--enable-*` mutation flags are set.
+- `security-triage review apply --issue-number ...` re-fetches the review issue fresh and applies only checked, conflict-free, schema-valid actions when the close reason is exactly `completed`, and only when the corresponding `--enable-*` mutation flags are set. These flags exist **only** on `review apply`; they do not and must not exist on `discovery` or `cleanup`.
 
 Battle testing is confined to `flatcar/security-triage` (`SECURITY_TRIAGE_ADVISORY_REPO`/`SECURITY_TRIAGE_REVIEW_REPO` both pinned to `${{ github.repository }}`); do not point either workflow at `flatcar/Flatcar` until the scheduled run has operated safely for several days and a maintainer explicitly decides to move it.
 
@@ -96,7 +96,7 @@ permissions:
 
 Use `Authorization: Bearer $GITHUB_TOKEN` for model inference requests. For repositories owned by an organization or enterprise, GitHub Models usage follows the repository owner's GitHub Models settings and billing configuration; it should not be treated as billed to the individual workflow actor. GitHub Models billing is separate from GitHub Copilot billing.
 
-For workflows that perform guarded GitHub issue mutations, grant `issues: write` explicitly and keep the CLI mutation flags disabled unless the run is intended to write.
+For workflows that perform guarded GitHub issue mutations (`review apply`), grant `issues: write` explicitly. `discovery` and `cleanup` commands never accept mutation flags and must not be given `issues: write` unless the same workflow token also runs `review create` (which only creates review issues, never advisory issues).
 
 Assume free GitHub Models usage is rate-limited and suitable only for prototyping. Prefer Foundry for sustained local testing. If GitHub Models is used beyond included free quotas, the organization or parent enterprise must explicitly opt in to paid GitHub Models usage and should configure budgets or spending controls.
 

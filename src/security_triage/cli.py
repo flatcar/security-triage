@@ -142,27 +142,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common_io_args(cleanup, "reports/cleanup.json")
     _add_model_args(cleanup)
-    _add_advisory_repo_arg(cleanup, "read/mutate")
+    _add_advisory_repo_arg(
+        cleanup, "read (output is fed to `review create` for human-gated apply)"
+    )
     cleanup.add_argument(
         "--issues-fixture", help="JSON/YAML fixture containing GitHub issues"
     )
     cleanup.add_argument(
         "--sbom-fixture", help="SPDX JSON fixture for the Stable production SBOM"
-    )
-    cleanup.add_argument(
-        "--apply-actions",
-        action="store_true",
-        help="Apply guarded GitHub actions after producing validated records",
-    )
-    cleanup.add_argument(
-        "--enable-post-cleanup-comments",
-        action="store_true",
-        help="Allow posting cleanup comments when --apply-actions is set",
-    )
-    cleanup.add_argument(
-        "--enable-close-issues",
-        action="store_true",
-        help="Allow closing remediated issues when --apply-actions is set",
     )
 
     _add_review_parser(subparsers)
@@ -455,7 +442,6 @@ def run_cleanup_command(args: argparse.Namespace) -> int:
         model_client,
         sbom_index,
         issues,
-        allow_close=args.enable_close_issues,
         debug_logger=debug_logger,
         progress_logger=progress,
         target_repo=advisory_repo,
@@ -466,20 +452,6 @@ def run_cleanup_command(args: argparse.Namespace) -> int:
     if args.markdown_output:
         progress.info(f"Writing Markdown report: {args.markdown_output}")
         write_markdown(args.markdown_output, render_cleanup_markdown(document))
-    if args.apply_actions:
-        progress.info("Applying guarded GitHub cleanup actions")
-        flags = ActionFlags(
-            post_cleanup_comments=args.enable_post_cleanup_comments,
-            close_issues=args.enable_close_issues,
-        )
-        runner = GitHubActionRunner(
-            GitHubIssueClient(repo=advisory_repo), flags, debug_logger
-        )
-        action_results = runner.apply_cleanup(document)
-        debug_logger.log("cleanup_action_results", results=action_results)
-        progress.info(
-            f"Completed {len(action_results)} guarded GitHub action result(s)"
-        )
     progress.info("Cleanup recommendation complete")
     print(f"wrote {args.output}")
     if args.markdown_output:

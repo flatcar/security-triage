@@ -78,8 +78,8 @@ jobs:
           echo "::add-mask::$TOKEN"
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
 
-      # Read-only: no --apply-actions / --enable-* mutation flag is passed,
-      # so this step can never create or edit an advisory issue directly.
+      # Read-only: discovery never writes advisory issues directly.
+      # Output is consumed by `review create` for human-gated apply.
       - name: Discovery
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -97,8 +97,8 @@ jobs:
             --markdown-output reports/discovery.md \
             --debug-log reports/discovery-debug.jsonl
 
-      # Read-only: no --apply-actions / --enable-* mutation flag is passed,
-      # so this step can never comment on or close an advisory issue directly.
+      # Read-only: cleanup never writes advisory issues directly.
+      # Output is consumed by `review create` for human-gated apply.
       - name: Cleanup
         env:
           GITHUB_TOKEN: ${{ github.token }}

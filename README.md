@@ -217,32 +217,21 @@ For source freshness, discovery prefers the entry's published or creation time o
 
 ## Repository Configuration
 
-`discovery` and `cleanup` accept `--advisory-repo` (env `SECURITY_TRIAGE_ADVISORY_REPO`) to choose which repository's advisory issues are read/mutated. Both default to `flatcar/Flatcar` when unset, preserving existing standalone behavior. The `review` commands below require explicit `--advisory-repo`/`--review-repo` (or their environment variables) with no implicit default, so a review batch always states exactly which repositories it describes.
+`discovery` and `cleanup` accept `--advisory-repo` (env `SECURITY_TRIAGE_ADVISORY_REPO`) to choose which repository's advisory issues are read. Both default to `flatcar/Flatcar` when unset, preserving existing standalone behavior. The `review` commands below require explicit `--advisory-repo`/`--review-repo` (or their environment variables) with no implicit default, so a review batch always states exactly which repositories it describes.
 
 ```bash
 security-triage discovery --advisory-repo flatcar/security-triage ...
 security-triage cleanup --advisory-repo flatcar/security-triage ...
 ```
 
-## Safety Flags
-
-No GitHub writes happen unless `--apply-actions` and the specific mutation flag are set.
-
-Discovery flags:
-
-- `--enable-create-issues`
-- `--enable-update-issues`
-
-Cleanup flags:
-
-- `--enable-post-cleanup-comments`
-- `--enable-close-issues`
-
-Issue closure is disabled by default. Cleanup recommendations are `comment_only` unless closure is explicitly enabled.
-
 ## Human-Gated Review and Apply Workflow
 
-Direct `--apply-actions` mutation (above) is one supported mode. The recommended mode for scheduled/CI runs is the two-stage, human-gated review workflow: discovery/cleanup produce reports, a review issue presents evidence and task-list checkboxes, and nothing touches an advisory issue until a maintainer closes that review issue with reason **Completed**.
+`discovery` and `cleanup` are read-only: they produce machine-readable JSON/YAML reports and never write advisory issues. The only supported path for GitHub advisory mutations is the human-gated review workflow:
+
+1. Discovery/cleanup produce reports.
+2. `review create` builds a review issue with evidence and task-list checkboxes.
+3. A maintainer reviews the issue and, when satisfied, closes it as **Completed**.
+4. `review apply` applies only the checked, conflict-free actions.
 
 ### 1. Render a review locally (dry run, no GitHub calls)
 
@@ -303,9 +292,9 @@ security-triage review apply \
   --output reports/review-apply.json
 ```
 
-Closing as **Not planned** (or any reason other than `completed`) makes zero GitHub writes. Apply performs only the fresh read needed to verify the close reason, then exits. Before every mutation, apply re-fetches the target issue, re-checks for a duplicate (for creates) or for open state and matching package/CVE identity (for updates/cleanup), and rebases additive body changes onto the *current* body using the same guarded field helpers as the direct-apply path, so existing content is never removed. Comments carry a hidden action-ID marker so reruns never repost. Once every selected group reaches a terminal result, the issue is labeled `security-triage/review-applied`; reopening and closing it again (or rerunning apply) is then a no-op.
+Closing as **Not planned** (or any reason other than `completed`) makes zero GitHub writes. Apply performs only the fresh read needed to verify the close reason, then exits. Before every mutation, apply re-fetches the target issue, re-checks for a duplicate (for creates) or for open state and matching package/CVE identity (for updates/cleanup), and rebases additive body changes onto the *current* body using the same guarded field helpers, so existing content is never removed. Comments carry a hidden action-ID marker so reruns never repost. Once every selected group reaches a terminal result, the issue is labeled `security-triage/review-applied`; reopening and closing it again (or rerunning apply) is then a no-op.
 
-`--enable-all-review-actions` is shorthand for `--enable-create-issues --enable-update-issues --enable-post-cleanup-comments --enable-close-issues`, reusing the same flags and removal guard as the direct `--apply-actions` path.
+`--enable-all-review-actions` is shorthand for `--enable-create-issues --enable-update-issues --enable-post-cleanup-comments --enable-close-issues`. These flags gate mutations through the review-apply path only.
 
 ### GitHub Actions
 
