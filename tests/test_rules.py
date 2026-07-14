@@ -123,7 +123,7 @@ def test_advisory_issue_query_can_omit_review_label_exclusion():
     assert REVIEW_LABEL not in query
 
 
-def test_advisory_issue_query_default_matches_backward_compatible_constant():
+def test_advisory_issue_query_constant_uses_target_repo():
     assert ADVISORY_ISSUE_QUERY == advisory_issue_query("flatcar/Flatcar")
 
 

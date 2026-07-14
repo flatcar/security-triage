@@ -675,9 +675,8 @@ def validate_cleanup_document(document: dict[str, Any]) -> None:
             )
 
 
-#: Backward-compatible default query for ``TARGET_REPO``. New code should call
-#: ``advisory_issue_query(repo)`` with an explicit, configured repository
-#: instead of relying on this module-level constant.
+#: Default advisory issue query for ``TARGET_REPO``. Callers that target a
+#: different repository should call ``advisory_issue_query(repo)`` directly.
 ADVISORY_ISSUE_QUERY = advisory_issue_query(TARGET_REPO)
 
 
