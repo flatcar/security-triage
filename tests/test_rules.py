@@ -118,7 +118,7 @@ def test_advisory_issue_query_is_parameterized_and_excludes_review_label():
     assert "flatcar/Flatcar" not in query
 
 
-def test_advisory_issue_query_can_include_review_label():
+def test_advisory_issue_query_can_omit_review_label_exclusion():
     query = advisory_issue_query("flatcar/security-triage", exclude_review_label=False)
     assert REVIEW_LABEL not in query
 
