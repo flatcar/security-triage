@@ -6,7 +6,7 @@ def test_load_dotenv_sets_values_without_overriding_existing(tmp_path, monkeypat
     env_file.write_text(
         "# local config\n"
         "GITHUB_TOKEN=from-file\n"
-        "GITHUB_MODELS_MODEL=\"openai/gpt-5\" # inline comment\n"
+        'GITHUB_MODELS_MODEL="openai/gpt-5" # inline comment\n'
         "export GITHUB_MODELS_API_VERSION=2022-11-28\n",
         encoding="utf-8",
     )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 class ProgressLogger:
@@ -11,7 +11,7 @@ class ProgressLogger:
     def info(self, message: str) -> None:
         if not self.enabled:
             return
-        timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        timestamp = datetime.now(UTC).strftime("%H:%M:%S")
         print(f"[{timestamp}] {message}", file=sys.stderr, flush=True)
 
     def section(self, message: str) -> None:

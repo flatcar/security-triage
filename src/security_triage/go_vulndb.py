@@ -42,9 +42,13 @@ def fetch_go_vulndb_entries(
         item
         for item in index_payload
         if isinstance(item, dict)
-        and in_window(str(item.get("modified") or ""), start, end, include_undated=False)
+        and in_window(
+            str(item.get("modified") or ""), start, end, include_undated=False
+        )
     ]
-    progress.info(f"go_vulndb: {len(selected)} advisories modified in processing window")
+    progress.info(
+        f"go_vulndb: {len(selected)} advisories modified in processing window"
+    )
 
     entries: list[SourceEntry] = []
     for item in selected:
@@ -52,10 +56,18 @@ def fetch_go_vulndb_entries(
         if not advisory_id:
             continue
         modified = str(item.get("modified") or "")
-        record = _fetch_advisory_record(advisory_id, modified, base, cache_dir, json_fetcher)
+        record = _fetch_advisory_record(
+            advisory_id, modified, base, cache_dir, json_fetcher
+        )
         if not isinstance(record, dict):
             continue
-        entries.append(_entry_from_osv(record, fallback_modified=modified, fallback_aliases=_string_list(item.get("aliases"))))
+        entries.append(
+            _entry_from_osv(
+                record,
+                fallback_modified=modified,
+                fallback_aliases=_string_list(item.get("aliases")),
+            )
+        )
     return entries
 
 
@@ -85,7 +97,9 @@ def _fetch_advisory_record(
     payload = json_fetcher(url)
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        cache_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+        )
     except OSError:
         pass
     return payload
@@ -100,7 +114,9 @@ def _safe_filename(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_") or "advisory.json"
 
 
-def _entry_from_osv(record: dict[str, Any], *, fallback_modified: str, fallback_aliases: list[str]) -> SourceEntry:
+def _entry_from_osv(
+    record: dict[str, Any], *, fallback_modified: str, fallback_aliases: list[str]
+) -> SourceEntry:
     advisory_id = str(record.get("id") or "").strip()
     aliases = _unique([*_string_list(record.get("aliases")), *fallback_aliases])
     packages = _affected_packages(record)
@@ -108,10 +124,16 @@ def _entry_from_osv(record: dict[str, Any], *, fallback_modified: str, fallback_
     affected_ranges = _affected_ranges(record)
     import_paths = _import_paths(record)
     reference_urls = _reference_urls(record)
-    database_specific = record.get("database_specific") if isinstance(record.get("database_specific"), dict) else {}
+    database_specific = (
+        record.get("database_specific")
+        if isinstance(record.get("database_specific"), dict)
+        else {}
+    )
     if not isinstance(database_specific, dict):
         database_specific = {}
-    report_url = str(database_specific.get("url") or f"https://pkg.go.dev/vuln/{advisory_id}")
+    report_url = str(
+        database_specific.get("url") or f"https://pkg.go.dev/vuln/{advisory_id}"
+    )
     summary = str(record.get("summary") or advisory_id)
     details = str(record.get("details") or "")
 
@@ -124,8 +146,12 @@ def _entry_from_osv(record: dict[str, Any], *, fallback_modified: str, fallback_
         "import_paths": import_paths,
         "references": reference_urls,
         "database_specific": database_specific,
-        "severity": record.get("severity") if isinstance(record.get("severity"), list) else [],
-        "credits": record.get("credits") if isinstance(record.get("credits"), list) else [],
+        "severity": record.get("severity")
+        if isinstance(record.get("severity"), list)
+        else [],
+        "credits": record.get("credits")
+        if isinstance(record.get("credits"), list)
+        else [],
     }
 
     return SourceEntry(
@@ -133,7 +159,17 @@ def _entry_from_osv(record: dict[str, Any], *, fallback_modified: str, fallback_
         source_url=report_url,
         entry_id=advisory_id,
         title=summary,
-        content=_render_go_content(advisory_id, summary, report_url, aliases, packages, affected_ranges, fixed_versions, import_paths, details),
+        content=_render_go_content(
+            advisory_id,
+            summary,
+            report_url,
+            aliases,
+            packages,
+            affected_ranges,
+            fixed_versions,
+            import_paths,
+            details,
+        ),
         published_at=_string_or_none(record.get("published")),
         updated_at=_string_or_none(record.get("modified")) or fallback_modified or None,
         references=references,
@@ -221,7 +257,9 @@ def _import_paths(record: dict[str, Any]) -> list[str]:
     imports: list[str] = []
     for affected in _dict_list(record.get("affected")):
         ecosystem_specific_raw = affected.get("ecosystem_specific")
-        ecosystem_specific: dict[str, Any] = ecosystem_specific_raw if isinstance(ecosystem_specific_raw, dict) else {}
+        ecosystem_specific: dict[str, Any] = (
+            ecosystem_specific_raw if isinstance(ecosystem_specific_raw, dict) else {}
+        )
         for item in _dict_list(ecosystem_specific.get("imports")):
             path = str(item.get("path") or "").strip()
             if path:
@@ -239,7 +277,11 @@ def _reference_urls(record: dict[str, Any]) -> list[str]:
 
 
 def _dict_list(value: Any) -> list[dict[str, Any]]:
-    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+    return (
+        [item for item in value if isinstance(item, dict)]
+        if isinstance(value, list)
+        else []
+    )
 
 
 def _string_list(value: Any) -> list[str]:

@@ -50,7 +50,9 @@ def test_apply_discovery_refuses_existing_issue_body_update_that_removes_cves():
     }
     client = FakeIssueClient()
 
-    results = GitHubActionRunner(client, ActionFlags(update_existing_issues=True)).apply_discovery(document)
+    results = GitHubActionRunner(
+        client, ActionFlags(update_existing_issues=True)
+    ).apply_discovery(document)
 
     assert client.body_updates == []
     assert client.comments == [(3000, "Review new Bugzilla context.")]

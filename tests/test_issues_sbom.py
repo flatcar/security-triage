@@ -1,6 +1,10 @@
 from pathlib import Path
 
-from security_triage.issues import find_existing_issue_matches, load_issue_fixture, parse_issue_body
+from security_triage.issues import (
+    find_existing_issue_matches,
+    load_issue_fixture,
+    parse_issue_body,
+)
 from security_triage.sbom import (
     compare_simple_versions,
     evaluate_fixed_version_requirements,
@@ -62,7 +66,9 @@ def test_parse_issue_body_accepts_live_markdown_fields_and_active_text():
 
 def test_existing_issue_matching_by_package_and_cve():
     issues = load_issue_fixture(str(FIXTURES / "github_issues.json"))
-    matches = find_existing_issue_matches({"package_name": "rust-openssl", "cves": ["CVE-2026-30002"]}, issues)
+    matches = find_existing_issue_matches(
+        {"package_name": "rust-openssl", "cves": ["CVE-2026-30002"]}, issues
+    )
     assert matches
     assert matches[0]["issue"] == 2109
     assert "package_name" in matches[0]["match_reasons"]
@@ -93,13 +99,17 @@ def test_fixed_version_ignores_struck_through_requirements_with_active_tbd():
 
 
 def test_fixed_version_uses_single_active_requirement_after_struck_through():
-    action_needed = "~CVE-2026-0989: update to >= 2.15.2~, CVE-2026-6732: update to >= 2.15.3"
+    action_needed = (
+        "~CVE-2026-0989: update to >= 2.15.2~, CVE-2026-6732: update to >= 2.15.3"
+    )
 
     assert extract_fixed_version_requirement(action_needed) == "2.15.3"
 
 
 def test_fixed_version_selects_highest_active_requirement():
-    action_needed = "CVE-2026-1111: update to >= 1.2.3, CVE-2026-2222: update to >= 1.3.0"
+    action_needed = (
+        "CVE-2026-1111: update to >= 1.2.3, CVE-2026-2222: update to >= 1.3.0"
+    )
 
     assert extract_fixed_version_requirements(action_needed) == ["1.2.3", "1.3.0"]
     assert extract_fixed_version_requirement(action_needed) == "1.3.0"
@@ -117,20 +127,37 @@ def test_or_style_alternatives_are_detected():
 def test_or_style_alternatives_remediated_when_lower_branch_satisfied():
     requirements = ["260", "259.5"]
 
-    comparison = evaluate_fixed_version_requirements("259.6", requirements, alternatives=True)
+    comparison = evaluate_fixed_version_requirements(
+        "259.6", requirements, alternatives=True
+    )
     assert comparison.result == "at_or_above"
 
     # Under AND-semantics the same installed version would be below the highest.
-    assert evaluate_fixed_version_requirements("259.6", requirements, alternatives=False).result == "below"
+    assert (
+        evaluate_fixed_version_requirements(
+            "259.6", requirements, alternatives=False
+        ).result
+        == "below"
+    )
 
 
 def test_or_style_alternatives_not_remediated_when_below_all():
     requirements = ["260", "259.5"]
 
-    assert evaluate_fixed_version_requirements("259.4", requirements, alternatives=True).result == "below"
+    assert (
+        evaluate_fixed_version_requirements(
+            "259.4", requirements, alternatives=True
+        ).result
+        == "below"
+    )
 
 
 def test_or_style_alternatives_ambiguous_when_not_conclusive():
     requirements = ["260", "259.5"]
 
-    assert evaluate_fixed_version_requirements("259.6-rc1", requirements, alternatives=True).result == "ambiguous"
+    assert (
+        evaluate_fixed_version_requirements(
+            "259.6-rc1", requirements, alternatives=True
+        ).result
+        == "ambiguous"
+    )

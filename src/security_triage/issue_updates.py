@@ -53,7 +53,11 @@ def set_field_if_placeholder(body: str, field: str, value: Any) -> str:
     return "\n".join(lines)
 
 
-def removal_guard_violations(existing_body: str, updated_body: str | None, parsed_issue: dict[str, Any] | None = None) -> list[str]:
+def removal_guard_violations(
+    existing_body: str,
+    updated_body: str | None,
+    parsed_issue: dict[str, Any] | None = None,
+) -> list[str]:
     if not updated_body or updated_body.strip() == existing_body.strip():
         return []
 
@@ -70,7 +74,9 @@ def removal_guard_violations(existing_body: str, updated_body: str | None, parse
 
     parsed = parsed_issue or _parsed_issue_dict(existing_body)
     action_needed = str(parsed.get("action_needed") or "").strip()
-    if not _is_placeholder(action_needed) and _compact(action_needed) not in _compact(updated_body):
+    if not _is_placeholder(action_needed) and _compact(action_needed) not in _compact(
+        updated_body
+    ):
         violations.append("existing Action Needed content would be removed")
 
     summary = str(parsed.get("summary") or "").strip()
@@ -132,9 +138,13 @@ def _value_missing(haystack: str, needle: str) -> bool:
         return wanted_upper not in {cve.upper() for cve in extract_cves(haystack)}
 
     if _URL_RE.fullmatch(wanted):
-        return wanted.casefold() not in {url.casefold() for url in _extract_urls(haystack)}
+        return wanted.casefold() not in {
+            url.casefold() for url in _extract_urls(haystack)
+        }
 
-    existing_tokens = {token.casefold() for token in re.split(r"[\n,;]+", haystack) if token.strip()}
+    existing_tokens = {
+        token.casefold() for token in re.split(r"[\n,;]+", haystack) if token.strip()
+    }
     return wanted.casefold() not in existing_tokens
 
 

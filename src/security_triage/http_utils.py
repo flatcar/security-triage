@@ -19,7 +19,9 @@ class HTTPError(RuntimeError):
 def _require_allowed_url(url: str) -> None:
     scheme = urllib.parse.urlsplit(url).scheme.lower()
     if scheme not in ALLOWED_SCHEMES:
-        raise HTTPError(f"Refusing to fetch non-HTTP(S) URL scheme {scheme or '(none)'!r}: {url}")
+        raise HTTPError(
+            f"Refusing to fetch non-HTTP(S) URL scheme {scheme or '(none)'!r}: {url}"
+        )
 
 
 def _origin(url: str) -> tuple[str, str, int | None]:
@@ -36,7 +38,7 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
     which would bypass the http/https allowlist enforced on the initial URL.
     """
 
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override,no-untyped-def]
         _require_allowed_url(newurl)
         new_request = super().redirect_request(req, fp, code, msg, headers, newurl)
         if new_request is not None and _origin(newurl) != _origin(req.full_url):
@@ -47,12 +49,14 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
 _OPENER = urllib.request.build_opener(_SafeRedirectHandler)
 
 
-def open_request(request: urllib.request.Request, timeout: int):
+def open_request(request: urllib.request.Request, timeout: int) -> Any:
     """Open ``request`` with redirect-safe handling (see _SafeRedirectHandler)."""
     return _OPENER.open(request, timeout=timeout)
 
 
-def fetch_text(url: str, token: str | None = None, timeout: int = 30, accept: str = "*/*") -> str:
+def fetch_text(
+    url: str, token: str | None = None, timeout: int = 30, accept: str = "*/*"
+) -> str:
     _require_allowed_url(url)
     headers = {
         "Accept": accept,
@@ -63,7 +67,7 @@ def fetch_text(url: str, token: str | None = None, timeout: int = 30, accept: st
     request = urllib.request.Request(url, headers=headers)
     try:
         with open_request(request, timeout=timeout) as response:
-            data = response.read(MAX_RESPONSE_BYTES + 1)
+            data: bytes = response.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise HTTPError(f"HTTP {exc.code} for {url}: {body[:500]}") from exc
@@ -74,5 +78,10 @@ def fetch_text(url: str, token: str | None = None, timeout: int = 30, accept: st
     return data.decode("utf-8", errors="replace")
 
 
-def fetch_json(url: str, token: str | None = None, timeout: int = 30, accept: str = "application/json") -> Any:
+def fetch_json(
+    url: str,
+    token: str | None = None,
+    timeout: int = 30,
+    accept: str = "application/json",
+) -> Any:
     return json.loads(fetch_text(url, token=token, timeout=timeout, accept=accept))

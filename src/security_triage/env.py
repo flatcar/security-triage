@@ -17,7 +17,9 @@ def load_dotenv(path: str | Path = ".env", override: bool = False) -> dict[str, 
     if not env_path.exists():
         return {}
     loaded: dict[str, str] = {}
-    for line_number, raw_line in enumerate(env_path.read_text(encoding="utf-8").splitlines(), start=1):
+    for line_number, raw_line in enumerate(
+        env_path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
         parsed = _parse_dotenv_line(raw_line)
         if parsed is None:
             continue
@@ -54,6 +56,10 @@ def _strip_inline_comment(value: str) -> str:
                 quote = None
             elif quote is None:
                 quote = character
-        if character == "#" and quote is None and (index == 0 or value[index - 1].isspace()):
+        if (
+            character == "#"
+            and quote is None
+            and (index == 0 or value[index - 1].isspace())
+        ):
             return value[:index].rstrip()
     return value

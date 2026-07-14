@@ -5,8 +5,16 @@ def test_fetch_go_vulndb_entries_maps_osv_record_and_caches(tmp_path):
     calls: list[str] = []
 
     index = [
-        {"id": "GO-2026-0001", "modified": "2026-05-01T12:00:00Z", "aliases": ["CVE-2026-1111"]},
-        {"id": "GO-2026-0002", "modified": "2026-04-01T12:00:00Z", "aliases": ["CVE-2026-2222"]},
+        {
+            "id": "GO-2026-0001",
+            "modified": "2026-05-01T12:00:00Z",
+            "aliases": ["CVE-2026-1111"],
+        },
+        {
+            "id": "GO-2026-0002",
+            "modified": "2026-04-01T12:00:00Z",
+            "aliases": ["CVE-2026-2222"],
+        },
     ]
     record = {
         "schema_version": "1.3.1",
@@ -25,11 +33,18 @@ def test_fetch_go_vulndb_entries_maps_osv_record_and_caches(tmp_path):
                         "events": [{"introduced": "0"}, {"fixed": "1.2.3"}],
                     }
                 ],
-                "ecosystem_specific": {"imports": [{"path": "example.com/mod/server", "symbols": ["Serve"]}]},
+                "ecosystem_specific": {
+                    "imports": [
+                        {"path": "example.com/mod/server", "symbols": ["Serve"]}
+                    ]
+                },
             }
         ],
         "references": [{"type": "WEB", "url": "https://example.test/go-advisory"}],
-        "database_specific": {"url": "https://pkg.go.dev/vuln/GO-2026-0001", "review_status": "REVIEWED"},
+        "database_specific": {
+            "url": "https://pkg.go.dev/vuln/GO-2026-0001",
+            "review_status": "REVIEWED",
+        },
     }
 
     def fake_fetcher(url: str):
@@ -81,7 +96,13 @@ def test_fetch_go_vulndb_entries_maps_osv_record_and_caches(tmp_path):
 def test_fetch_go_vulndb_entries_uses_modified_window():
     def fake_fetcher(url: str):
         if url.endswith("/index/vulns.json"):
-            return [{"id": "GO-2026-0001", "modified": "2026-04-01T12:00:00Z", "aliases": []}]
+            return [
+                {
+                    "id": "GO-2026-0001",
+                    "modified": "2026-04-01T12:00:00Z",
+                    "aliases": [],
+                }
+            ]
         raise AssertionError("out-of-window advisory detail should not be fetched")
 
     entries = fetch_go_vulndb_entries(

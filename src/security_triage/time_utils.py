@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 
 
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def iso_now() -> str:
@@ -34,11 +34,13 @@ def parse_datetime(value: str | None) -> datetime | None:
         except (TypeError, ValueError):
             return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
-def in_window(value: str | None, start: str | None, end: str | None, include_undated: bool = True) -> bool:
+def in_window(
+    value: str | None, start: str | None, end: str | None, include_undated: bool = True
+) -> bool:
     parsed = parse_datetime(value)
     if parsed is None:
         return include_undated

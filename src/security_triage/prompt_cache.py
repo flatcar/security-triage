@@ -48,7 +48,9 @@ class PromptCache:
             "prompt_version": prompt_version,
             "request": request_payload,
         }
-        encoded = json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        encoded = json.dumps(material, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
         return hashlib.sha256(encoded).hexdigest()
 
     def _path_for(self, key: str) -> Path:
@@ -73,7 +75,9 @@ class PromptCache:
         self.hits += 1
         return response
 
-    def put(self, key: str, response: dict[str, Any], *, task: str | None = None) -> None:
+    def put(
+        self, key: str, response: dict[str, Any], *, task: str | None = None
+    ) -> None:
         path = self._path_for(key)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)

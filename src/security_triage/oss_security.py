@@ -7,7 +7,7 @@ import html
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -23,7 +23,7 @@ OSS_SECURITY_BASE_URL = "https://www.openwall.com/lists/oss-security/"
 
 _MSG_INDEX_RE = re.compile(r'href="(\d+)"')
 _PRE_RE = re.compile(
-    r'<pre[^>]*white-space:\s*pre-wrap[^>]*>(.*?)</pre>',
+    r"<pre[^>]*white-space:\s*pre-wrap[^>]*>(.*?)</pre>",
     re.DOTALL | re.IGNORECASE,
 )
 _THREAD_NAV_RE = re.compile(
@@ -127,8 +127,10 @@ def _build_fetcher(cache_dir: str | Path | None, fetcher: Fetcher | None) -> Fet
     if fetcher is not None:
         base = fetcher
     else:
+
         def base(url: str) -> str:
             return fetch_text(url, accept="text/html,*/*;q=0.8", timeout=30)
+
     if cache_dir is None:
         return base
     cache_root = Path(cache_dir)
@@ -173,7 +175,7 @@ def _cache_path(root: Path, url: str) -> Path:
 
 
 def _iter_days(start: str | None, end: str | None) -> list[date]:
-    end_dt = parse_datetime(end) or datetime.now(timezone.utc)
+    end_dt = parse_datetime(end) or datetime.now(UTC)
     start_dt = parse_datetime(start) or (end_dt - timedelta(days=7))
     if start_dt > end_dt:
         return []
@@ -293,23 +295,33 @@ def _strip_inner_tags(html_fragment: str) -> str:
     return "".join(stripper.parts)
 
 
-def _thread_to_entry(thread: _Thread, start: str | None, end: str | None) -> SourceEntry | None:
+def _thread_to_entry(
+    thread: _Thread, start: str | None, end: str | None
+) -> SourceEntry | None:
     root = thread.root
     all_messages = [root, *thread.replies]
     dates = [parse_datetime(msg.date_iso) for msg in all_messages]
     valid_dates = [dt for dt in dates if dt is not None]
     updated_iso = max(valid_dates).isoformat() if valid_dates else root.date_iso
 
-    comments = [_message_to_comment(msg, index) for index, msg in enumerate(thread.replies, start=1)]
+    comments = [
+        _message_to_comment(msg, index)
+        for index, msg in enumerate(thread.replies, start=1)
+    ]
     new_comments = [
-        comment for comment in comments
-        if in_window(str(comment.get("creation_time") or ""), start, end, include_undated=False)
+        comment
+        for comment in comments
+        if in_window(
+            str(comment.get("creation_time") or ""), start, end, include_undated=False
+        )
     ]
     root_in_window = in_window(root.date_iso or "", start, end, include_undated=False)
     if not root_in_window and not new_comments:
         return None
 
-    cve_ids = extract_cves(" ".join(msg.subject for msg in all_messages) + "\n" + root.body)
+    cve_ids = extract_cves(
+        " ".join(msg.subject for msg in all_messages) + "\n" + root.body
+    )
     references = [root.url, *cve_ids]
 
     return SourceEntry(
@@ -378,7 +390,9 @@ def _render_thread_content(root: _Message, new_comments: list[dict[str, Any]]) -
             creator = comment.get("creator") or "unknown"
             created = comment.get("creation_time") or "unknown time"
             text = _truncate(str(comment.get("text") or ""), 600)
-            lines.append(f"- Reply #{comment.get('count')} by {creator} at {created}: {text}")
+            lines.append(
+                f"- Reply #{comment.get('count')} by {creator} at {created}: {text}"
+            )
     return "\n".join(lines)
 
 

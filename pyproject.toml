@@ -62,7 +62,13 @@ select = [
     "C4",  # flake8-comprehensions
     "UP",  # pyupgrade
 ]
-ignore = []
+ignore = [
+    # `ruff format` already reflows code within `line-length`; leftover long
+    # lines are strings, long log/error messages, or argument sequences the
+    # formatter deliberately refuses to break. Flagging them again as a lint
+    # error only produces churn without improving readability.
+    "E501",
+]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -105,3 +111,15 @@ python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
+# `tests/` has no `__init__.py`; enable namespace-package discovery so that
+# mypy resolves test files as `tests.test_*` and the override below applies.
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = "src"
+
+# Tests are pytest-style functions where `-> None` annotations add no signal;
+# don't force type annotations there.
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+warn_return_any = false

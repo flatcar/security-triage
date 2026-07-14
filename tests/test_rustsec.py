@@ -1,9 +1,7 @@
 import json
-
 from urllib.parse import parse_qs, urlparse
 
 from security_triage.rustsec import fetch_rustsec_entries
-
 
 RUSTSEC_MARKDOWN = """```toml
 [advisory]
@@ -96,7 +94,9 @@ def test_fetch_rustsec_entries_maps_markdown_and_caches(tmp_path):
     assert entry.source_url == "https://rustsec.org/advisories/RUSTSEC-2026-0118.html"
     assert entry.published_at == "2026-05-01"
     assert entry.updated_at == "2026-05-01T13:00:00Z"
-    assert entry.title == "NSEC3 closest-encloser proof validation enters unbounded loop"
+    assert (
+        entry.title == "NSEC3 closest-encloser proof validation enters unbounded loop"
+    )
     assert "Package: hickory-proto" in entry.content
     assert "Unaffected versions: < 0.25.0-alpha.3, >= 0.26.0-beta.1" in entry.content
     assert "CVE-2026-5555" in entry.references
@@ -129,8 +129,14 @@ def test_fetch_rustsec_entries_skips_removed_and_out_of_window_files():
                 "sha": "oldsha",
                 "commit": {"committer": {"date": "2026-04-01T13:00:00Z"}},
                 "files": [
-                    {"filename": "crates/example/RUSTSEC-2026-0001.md", "status": "modified"},
-                    {"filename": "crates/example/RUSTSEC-2026-0002.md", "status": "removed"},
+                    {
+                        "filename": "crates/example/RUSTSEC-2026-0001.md",
+                        "status": "modified",
+                    },
+                    {
+                        "filename": "crates/example/RUSTSEC-2026-0002.md",
+                        "status": "removed",
+                    },
                 ],
             }
         raise AssertionError(f"unexpected JSON URL {url}")

@@ -3,7 +3,6 @@ from __future__ import annotations
 from security_triage.http_utils import HTTPError
 from security_triage.oss_security import fetch_oss_security_entries
 
-
 BASE = "https://www.openwall.com/lists/oss-security/"
 
 DAY_INDEX_HTML = """
@@ -150,7 +149,9 @@ def test_cache_path_stays_inside_cache_root():
         assert not path.is_absolute(), url
         assert root in path.parents, url
         assert ".." not in path.parts, url
-        assert not any(":" in part or "/" in part or "\\" in part for part in path.parts[1:]), url
+        assert not any(
+            ":" in part or "/" in part or "\\" in part for part in path.parts[1:]
+        ), url
 
 
 def test_cache_path_keeps_normal_names_readable():
@@ -159,7 +160,13 @@ def test_cache_path_keeps_normal_names_readable():
     from security_triage.oss_security import _cache_path
 
     root = Path("cache-root")
-    assert _cache_path(root, "https://www.openwall.com/lists/oss-security/2026/05/04/1") == root / "lists" / "oss-security" / "2026" / "05" / "04" / "1.html"
-    assert _cache_path(root, "https://www.openwall.com/lists/oss-security/2026/05/04/") == root / "lists" / "oss-security" / "2026" / "05" / "04.html"
+    assert (
+        _cache_path(root, "https://www.openwall.com/lists/oss-security/2026/05/04/1")
+        == root / "lists" / "oss-security" / "2026" / "05" / "04" / "1.html"
+    )
+    assert (
+        _cache_path(root, "https://www.openwall.com/lists/oss-security/2026/05/04/")
+        == root / "lists" / "oss-security" / "2026" / "05" / "04.html"
+    )
     assert _cache_path(root, "https://www.openwall.com/") == root / "index.html"
     assert _cache_path(root, "https://www.openwall.com/page.html") == root / "page.html"

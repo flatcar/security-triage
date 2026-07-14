@@ -9,8 +9,13 @@ from .io_utils import load_structured_file
 from .records import SBOMPackage
 from .rules import FLATCAR_PRODUCTION_SBOM_URL, active_markdown_text, normalize_name
 
-_REQUIREMENT_RE = re.compile(r"(?:>=|at\s+least|(?:update|upgrade)\s+to\s+>=?)\s*v?([0-9][0-9A-Za-z._+:-]*)", re.IGNORECASE)
-_COMPARABLE_VERSION_RE = re.compile(r"^v?(?P<base>\d+(?:\.\d+){0,5})(?:-r(?P<revision>\d+))?$", re.IGNORECASE)
+_REQUIREMENT_RE = re.compile(
+    r"(?:>=|at\s+least|(?:update|upgrade)\s+to\s+>=?)\s*v?([0-9][0-9A-Za-z._+:-]*)",
+    re.IGNORECASE,
+)
+_COMPARABLE_VERSION_RE = re.compile(
+    r"^v?(?P<base>\d+(?:\.\d+){0,5})(?:-r(?P<revision>\d+))?$", re.IGNORECASE
+)
 _OR_ALTERNATIVE_RE = re.compile(r"\bor\b", re.IGNORECASE)
 _OR_BARE_VERSION_RE = re.compile(r"\bor\s+v?([0-9][0-9A-Za-z._+:-]*)", re.IGNORECASE)
 
@@ -22,12 +27,14 @@ class VersionComparison:
 
 
 class SBOMIndex:
-    def __init__(self, packages: list[SBOMPackage], metadata: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self, packages: list[SBOMPackage], metadata: dict[str, Any] | None = None
+    ) -> None:
         self.packages = packages
         self.metadata = metadata or {}
 
     @classmethod
-    def from_spdx(cls, payload: dict[str, Any]) -> "SBOMIndex":
+    def from_spdx(cls, payload: dict[str, Any]) -> SBOMIndex:
         packages: list[SBOMPackage] = []
         for item in payload.get("packages", []) or []:
             purls = [
@@ -66,7 +73,9 @@ class SBOMIndex:
             if normalize_name(package.name) == normalized_query:
                 exact_matches.append((package, "exact_name"))
                 continue
-            purl_names = {normalize_name(package_name_from_purl(purl)) for purl in package.purls}
+            purl_names = {
+                normalize_name(package_name_from_purl(purl)) for purl in package.purls
+            }
             if normalized_query in purl_names:
                 exact_matches.append((package, "exact_purl"))
 
@@ -76,10 +85,17 @@ class SBOMIndex:
         substring_matches: list[tuple[SBOMPackage, str]] = []
         for package in self.packages:
             normalized_name = normalize_name(package.name)
-            if len(normalized_query) >= 4 and (normalized_query in normalized_name or normalized_name in normalized_query):
+            if len(normalized_query) >= 4 and (
+                normalized_query in normalized_name
+                or normalized_name in normalized_query
+            ):
                 substring_matches.append((package, "unique_substring"))
                 continue
-            if any(len(normalized_query) >= 4 and normalized_query in normalize_name(package_name_from_purl(purl)) for purl in package.purls):
+            if any(
+                len(normalized_query) >= 4
+                and normalized_query in normalize_name(package_name_from_purl(purl))
+                for purl in package.purls
+            ):
                 substring_matches.append((package, "unique_substring"))
         deduped = _dedupe_matches(substring_matches)
         if len(deduped) > 1:
@@ -111,7 +127,9 @@ def package_name_from_purl(purl: str | None) -> str:
 
 
 def extract_fixed_version_requirement(action_needed: str | None) -> str | None:
-    return highest_fixed_version_requirement(extract_fixed_version_requirements(action_needed))
+    return highest_fixed_version_requirement(
+        extract_fixed_version_requirements(action_needed)
+    )
 
 
 def extract_fixed_version_requirements(action_needed: str | None) -> list[str]:
@@ -183,8 +201,18 @@ def evaluate_fixed_version_requirements(
                 f"Fixed-version requirements are not comparable: {', '.join(requirements)}",
             )
         return compare_simple_versions(installed_version, highest)
-    comparisons = [compare_simple_versions(installed_version, requirement) for requirement in requirements]
-    satisfied = next((comparison for comparison in comparisons if comparison.result == "at_or_above"), None)
+    comparisons = [
+        compare_simple_versions(installed_version, requirement)
+        for requirement in requirements
+    ]
+    satisfied = next(
+        (
+            comparison
+            for comparison in comparisons
+            if comparison.result == "at_or_above"
+        ),
+        None,
+    )
     if satisfied is not None:
         return VersionComparison(
             "at_or_above",
@@ -201,25 +229,39 @@ def evaluate_fixed_version_requirements(
     )
 
 
-def compare_simple_versions(installed_version: str | None, required_version: str | None) -> VersionComparison:
+def compare_simple_versions(
+    installed_version: str | None, required_version: str | None
+) -> VersionComparison:
     if not installed_version or not required_version:
         return VersionComparison("ambiguous", "Missing installed or required version")
     installed = installed_version.strip()
     required = required_version.strip()
     installed_parsed = _parse_comparable_version(installed)
     if installed_parsed is None:
-        return VersionComparison("ambiguous", f"Installed version is not a simple dotted numeric or Gentoo revision version: {installed_version}")
+        return VersionComparison(
+            "ambiguous",
+            f"Installed version is not a simple dotted numeric or Gentoo revision version: {installed_version}",
+        )
     required_parsed = _parse_comparable_version(required)
     if required_parsed is None:
-        return VersionComparison("ambiguous", f"Required version is not a simple dotted numeric or Gentoo revision version: {required_version}")
+        return VersionComparison(
+            "ambiguous",
+            f"Required version is not a simple dotted numeric or Gentoo revision version: {required_version}",
+        )
     installed_parts, installed_revision = installed_parsed
     required_parts, required_revision = required_parsed
     max_length = max(len(installed_parts), len(required_parts))
     installed_padded = installed_parts + (0,) * (max_length - len(installed_parts))
     required_padded = required_parts + (0,) * (max_length - len(required_parts))
-    if installed_padded > required_padded or (installed_padded == required_padded and installed_revision >= required_revision):
-        return VersionComparison("at_or_above", f"{installed_version} is at or above {required_version}")
-    return VersionComparison("below", f"{installed_version} is below {required_version}")
+    if installed_padded > required_padded or (
+        installed_padded == required_padded and installed_revision >= required_revision
+    ):
+        return VersionComparison(
+            "at_or_above", f"{installed_version} is at or above {required_version}"
+        )
+    return VersionComparison(
+        "below", f"{installed_version} is below {required_version}"
+    )
 
 
 def _parse_comparable_version(value: str) -> tuple[tuple[int, ...], int] | None:
