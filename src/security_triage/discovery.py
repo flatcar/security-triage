@@ -23,10 +23,13 @@ from .rules import (
     coerce_extraction,
     coerce_relevance,
     extract_cves,
+    is_gentoo_reference,
     issue_labels,
     neutralize_mentions,
     render_issue_body,
+    sanitize_single_line,
     validate_discovery_document,
+    validate_repo_name,
 )
 from .sbom import SBOMIndex
 from .time_utils import iso_now
@@ -40,12 +43,14 @@ class DiscoveryWorkflow:
         issues: list[Issue],
         debug_logger: DebugLogger | None = None,
         progress_logger: ProgressLogger | None = None,
+        target_repo: str = TARGET_REPO,
     ) -> None:
         self.model_client = model_client
         self.sbom_index = sbom_index
         self.issues = issues
         self.debug_logger = debug_logger or DebugLogger()
         self.progress_logger = progress_logger or NullProgressLogger()
+        self.target_repo = validate_repo_name(target_repo)
 
     def run(
         self, entries: list[SourceEntry], window_start: str, window_end: str
@@ -94,7 +99,7 @@ class DiscoveryWorkflow:
             "schema_version": SCHEMA_VERSION,
             "workflow": "new_vulnerability_discovery",
             "generated_at": iso_now(),
-            "target_repo": TARGET_REPO,
+            "target_repo": self.target_repo,
             "processing_window": {
                 "start": window_start,
                 "end": window_end,
@@ -265,14 +270,14 @@ def _upstream_references(entry: SourceEntry) -> list[str]:
 def _proposed_issue(
     extraction: dict[str, Any], relevance: dict[str, Any]
 ) -> dict[str, Any]:
-    package_name = extraction["package_name"]
+    package_name = sanitize_single_line(extraction["package_name"])
     labels = issue_labels(
         extraction.get("cvss_scores"),
         relevance.get("scope"),
         extraction.get("scope_assessment"),
     )
     gentoo_ref = extraction.get("gentoo_ref")
-    if not _is_gentoo_ref(gentoo_ref):
+    if not is_gentoo_reference(gentoo_ref):
         gentoo_ref = None
     return {
         "title": f"update: {package_name}",
@@ -646,18 +651,7 @@ def _gentoo_refs_for_update(
     candidates.extend(entry.metadata.get("see_also", []) or [])
     candidates.extend(entry.references)
     return _dedupe_strings(
-        [candidate for candidate in candidates if _is_gentoo_ref(candidate)]
-    )
-
-
-def _is_gentoo_ref(value: Any) -> bool:
-    text = str(value or "").strip()
-    if not text or text.upper() in {"TBD", "N/A", "NONE"}:
-        return False
-    return (
-        "bugs.gentoo.org" in text
-        or "glsa.gentoo.org" in text
-        or "security.gentoo.org/glsa" in text
+        [candidate for candidate in candidates if is_gentoo_reference(candidate)]
     )
 
 

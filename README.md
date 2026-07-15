@@ -215,21 +215,92 @@ Discovery defaults to a seven-day processing window. Live sources are source-spe
 
 For source freshness, discovery prefers the entry's published or creation time over later metadata updates for generic sources, while thread/advisory sources use their updated or modified time so new comments and modified advisories are not missed. Live source entries without a timestamp are skipped by default; include them only for intentional backfills.
 
-## Safety Flags
+## Repository Configuration
 
-No GitHub writes happen unless `--apply-actions` and the specific mutation flag are set.
+`discovery` and `cleanup` accept `--advisory-repo` (env `SECURITY_TRIAGE_ADVISORY_REPO`) to choose which repository's advisory issues are read. Both default to `flatcar/Flatcar` when unset, preserving existing standalone behavior. The `review` commands below require explicit `--advisory-repo`/`--review-repo` (or their environment variables) with no implicit default, so a review batch always states exactly which repositories it describes.
 
-Discovery flags:
+```bash
+security-triage discovery --advisory-repo flatcar/security-triage ...
+security-triage cleanup --advisory-repo flatcar/security-triage ...
+```
 
-- `--enable-create-issues`
-- `--enable-update-issues`
+## Human-Gated Review and Apply Workflow
 
-Cleanup flags:
+`discovery` and `cleanup` are read-only: they produce machine-readable JSON/YAML reports and never write advisory issues. The only supported path for GitHub advisory mutations is the human-gated review workflow:
 
-- `--enable-post-cleanup-comments`
-- `--enable-close-issues`
+1. Discovery/cleanup produce reports.
+2. `review create` builds a review issue with evidence and task-list checkboxes.
+3. A maintainer reviews the issue and, when satisfied, closes it as **Completed**.
+4. `review apply` applies only the checked, conflict-free actions.
 
-Issue closure is disabled by default. Cleanup recommendations are `comment_only` unless closure is explicitly enabled.
+### 1. Render a review locally (dry run, no GitHub calls)
+
+`security-triage review render` builds the exact review issue title/body(ies) from discovery/cleanup JSON documents and writes them to local Markdown files. It never constructs a GitHub client, never reads `GITHUB_TOKEN`, and never makes a network call.
+
+```bash
+security-triage discovery --source-fixture tests/fixtures/discovery_entries.json \
+  --issues-fixture tests/fixtures/github_issues.json --sbom-fixture tests/fixtures/sbom.json \
+  --advisory-repo flatcar/security-triage --output reports/discovery.json
+
+security-triage cleanup --issues-fixture tests/fixtures/github_issues.json \
+  --sbom-fixture tests/fixtures/sbom.json --advisory-repo flatcar/security-triage \
+  --output reports/cleanup.json
+
+security-triage review render \
+  --discovery-json reports/discovery.json \
+  --cleanup-json reports/cleanup.json \
+  --advisory-repo flatcar/security-triage \
+  --review-repo flatcar/security-triage \
+  --run-id local-preview-1 \
+  --output-dir reports/review-dry-run
+```
+
+This writes one Markdown file per review part (for example
+`reports/review-dry-run/local-preview-1-part-1.md`) plus a
+`dry-run-summary.md` index. Each part file's content after the
+`<!-- security-triage:dry-run-body-start -->` marker is byte-for-byte the
+same body `review create` would submit to GitHub for that part, so this is a
+safe way to inspect exactly what a scheduled run would produce before ever
+creating anything.
+
+### 2. Create the review issue(s)
+
+`security-triage review create` builds the same batch and idempotently creates (or reuses, for a rerun of the same `--run-id`) one review issue per part, labeled `security-triage/review`:
+
+```bash
+security-triage review create \
+  --discovery-json reports/discovery.json \
+  --cleanup-json reports/cleanup.json \
+  --advisory-repo flatcar/security-triage \
+  --review-repo flatcar/security-triage \
+  --run-id "$GITHUB_RUN_ID" \
+  --output reports/review-create.json
+```
+
+Each review issue contains, per decision group: package/component, CVEs, CVSS, SBOM/existing-issue evidence, the recommendation and rationale, the exact proposed issue title/body or comment, and one or more checkboxes carrying a hidden machine-readable action ID. A single unchecked box means no action. A decision group with more than one checked box fails closed (conflict, skipped, reported). The full manifest needed to apply the batch is embedded, base64-encoded, in a hidden HTML comment; a SHA-256 digest inside it detects accidental corruption.
+
+### 3. Apply on close
+
+`security-triage review apply` re-fetches the review issue fresh (never trusts a webhook payload) and applies only checked, conflict-free, schema-valid actions when the issue's close reason is exactly `completed`:
+
+```bash
+security-triage review apply \
+  --issue-number 123 \
+  --advisory-repo flatcar/security-triage \
+  --review-repo flatcar/security-triage \
+  --enable-all-review-actions \
+  --output reports/review-apply.json
+```
+
+Closing as **Not planned** (or any reason other than `completed`) makes zero GitHub writes. Apply performs only the fresh read needed to verify the close reason, then exits. Before every mutation, apply re-fetches the target issue, re-checks for a duplicate (for creates) or for open state and matching package/CVE identity (for updates/cleanup), and rebases additive body changes onto the *current* body using the same guarded field helpers, so existing content is never removed. Comments carry a hidden action-ID marker so reruns never repost. Once every selected group reaches a terminal result, the issue is labeled `security-triage/review-applied`; reopening and closing it again (or rerunning apply) is then a no-op.
+
+`--enable-all-review-actions` is shorthand for `--enable-create-issues --enable-update-issues --enable-post-cleanup-comments --enable-close-issues`. These flags gate mutations through the review-apply path only.
+
+### GitHub Actions
+
+- `.github/workflows/security-triage.yml` runs discovery/cleanup daily (`06:00 UTC`) with Microsoft Foundry via GitHub OIDC, then calls `review create`. See `docs/github-actions-foundry-oidc.md` for the one-time Azure setup (Portal and CLI paths, troubleshooting, and why no client secret is needed).
+- `.github/workflows/security-triage-apply.yml` triggers only on `issues: closed` (plus a manual `workflow_dispatch` resume input) and calls `review apply`. It never calls Foundry, Azure, or reruns analysis.
+- Both workflows pin `SECURITY_TRIAGE_ADVISORY_REPO`/`SECURITY_TRIAGE_REVIEW_REPO` (or the equivalent `--advisory-repo`/`--review-repo` arguments) to `${{ github.repository }}` for battle testing in this repository.
 
 ## Outputs
 
@@ -251,6 +322,8 @@ Cleanup JSON root fields include:
 - `errors`
 
 Every workflow validates its output contract before writing the document.
+
+Review batches are not a stored document format in the same sense: `review render`/`review create` write per-part Markdown (the issue title/body) and a small JSON summary of created/existing issue URLs (`--output`, default `reports/review-create.json`); the authoritative, replayable state is the manifest embedded in each review issue itself, not a local file.
 
 ## Development
 
@@ -282,7 +355,7 @@ uv build
 
 Coverage output lands in `htmlcov/` (HTML), `coverage.xml`, and the terminal report. Coverage is configured in `pyproject.toml`; the CLI-oriented `pytest.ini` mirrors the same options for direct `pytest` invocations.
 
-The tests cover issue parsing, SBOM parsing, package matching, version comparison, severity/scope labels, discovery guardrails, cleanup guardrails, CLI output, GitHub Models and Foundry request shapes, source fetchers, and fixture dry-run behavior.
+The tests cover issue parsing, SBOM parsing, package matching, version comparison, severity/scope labels, discovery guardrails, cleanup guardrails, CLI output, GitHub Models and Foundry request shapes, source fetchers, fixture dry-run behavior, the review manifest/rendering/splitting/checkbox logic, apply-on-close gating and idempotency (using a stateful fake GitHub client), and GitHub Actions workflow policy (triggers, permissions, concurrency, and repository parameterization).
 
 ## Continuous Integration and Releases
 

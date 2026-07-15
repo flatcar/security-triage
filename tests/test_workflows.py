@@ -300,7 +300,7 @@ def test_cleanup_workflow_fixture_decisions():
     records = {record["issue"]: record for record in document["records"]}
 
     assert records[2088]["status"] == "remediated_in_current_production_sbom"
-    assert records[2088]["recommended_action"] == "comment_only"
+    assert records[2088]["recommended_action"] == "close_issue"
     assert (
         "Pipeline recommendation: close as fixed/remediated."
         in records[2088]["comment_body"]
@@ -579,7 +579,7 @@ def test_cleanup_can_use_model_to_close_for_ambiguous_package_match_with_low_con
         ]
     )
 
-    document = CleanupWorkflow(RemediatedModel(), sbom, issues, allow_close=True).run()
+    document = CleanupWorkflow(RemediatedModel(), sbom, issues).run()
     record = document["records"][0]
 
     assert record["status"] == "remediated_in_current_production_sbom"

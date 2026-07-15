@@ -9,14 +9,15 @@ from .models import BaseModelClient
 from .reasoning import build_cleanup_evidence_bundle
 from .records import Issue
 from .rules import (
-    ADVISORY_ISSUE_QUERY,
     FLATCAR_PRODUCTION_SBOM_URL,
     SCHEMA_VERSION,
     TARGET_REPO,
+    advisory_issue_query,
     cleanup_comment_body,
     coerce_cleanup_review,
     min_confidence,
     validate_cleanup_document,
+    validate_repo_name,
 )
 from .sbom import (
     SBOMIndex,
@@ -34,16 +35,16 @@ class CleanupWorkflow:
         model_client: BaseModelClient,
         sbom_index: SBOMIndex,
         issues: list[Issue],
-        allow_close: bool = False,
         debug_logger: DebugLogger | None = None,
         progress_logger: ProgressLogger | None = None,
+        target_repo: str = TARGET_REPO,
     ) -> None:
         self.model_client = model_client
         self.sbom_index = sbom_index
         self.issues = issues
-        self.allow_close = allow_close
         self.debug_logger = debug_logger or DebugLogger()
         self.progress_logger = progress_logger or NullProgressLogger()
+        self.target_repo = validate_repo_name(target_repo)
 
     def run(self) -> dict[str, Any]:
         records: list[dict[str, Any]] = []
@@ -77,9 +78,9 @@ class CleanupWorkflow:
             "schema_version": SCHEMA_VERSION,
             "workflow": "advisory_cleanup_recommendation",
             "generated_at": iso_now(),
-            "target_repo": TARGET_REPO,
+            "target_repo": self.target_repo,
             "sbom_url": FLATCAR_PRODUCTION_SBOM_URL,
-            "issue_query": ADVISORY_ISSUE_QUERY,
+            "issue_query": advisory_issue_query(self.target_repo),
             "records": records,
             "errors": errors,
         }
@@ -147,7 +148,7 @@ class CleanupWorkflow:
         status, confidence, final_reasons = _finalize_cleanup_status(
             preliminary_status, preliminary_reasons, llm_review
         )
-        recommended_action = _recommended_action(status, self.allow_close)
+        recommended_action = _recommended_action(status)
         comment_body = ""
         if status == "remediated_in_current_production_sbom" and sbom_matches:
             comment_body = cleanup_comment_body(
@@ -351,9 +352,9 @@ def _can_use_model_override_for_ambiguity(preliminary_reasons: list[str]) -> boo
     )
 
 
-def _recommended_action(status: str, allow_close: bool) -> str:
+def _recommended_action(status: str) -> str:
     if status == "remediated_in_current_production_sbom":
-        return "close_issue" if allow_close else "comment_only"
+        return "close_issue"
     if status == "not_remediated_in_current_production_sbom":
         return "keep_open"
     return "manual_review"

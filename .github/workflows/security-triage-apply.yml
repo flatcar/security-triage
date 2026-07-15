@@ -1,0 +1,77 @@
+name: Flatcar Security Triage Review Apply
+
+# Reacts when a security-triage review issue is closed. Applies only the
+# checked, conflict-free actions when the close reason is exactly
+# "completed"; performs zero GitHub mutations for every other close reason
+# (including "not planned" or an issue reopened and closed again after it was
+# already applied). The Python gate in `security-triage review apply` is
+# authoritative: it always re-fetches the issue fresh rather than trusting
+# this webhook payload or its labels, because both can be stale.
+#
+# This workflow performs no model inference, requests no cloud OIDC token
+# exchange, and never re-runs analysis: applying an approved decision is a
+# fully deterministic, offline operation over GitHub API state alone.
+
+on:
+  issues:
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'Review issue number to (re)apply, for manual resume after a partial failure'
+        required: true
+        type: number
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  # Scoped per review issue number so two close events (or a manual resume)
+  # for the same issue can never race; never cancel a partially-applied run.
+  group: security-triage-review-apply-${{ github.event.issue.number || github.event.inputs.issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    # Job-level fast filter on the dedicated review label. This is only an
+    # optimization: the Python gate re-checks the label (and everything else)
+    # against a freshly fetched issue before applying anything.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.issue.labels.*.name, 'security-triage/review')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install
+        run: python -m pip install -e '.[yaml]'
+
+      # Battle testing: both repositories are pinned to `${{ github.repository }}`.
+      # A same-repository GITHUB_TOKEN cannot mutate a different repository;
+      # see docs/github-actions-foundry-oidc.md for the future cross-repository
+      # GitHub App option when this moves to the production repository.
+      - name: Apply review issue
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          security-triage review apply \
+            --issue-number "${{ github.event.issue.number || github.event.inputs.issue_number }}" \
+            --advisory-repo "${{ github.repository }}" \
+            --review-repo "${{ github.repository }}" \
+            --enable-all-review-actions \
+            --output reports/review-apply.json \
+            --debug-log reports/review-apply-debug.jsonl
+
+      - name: Upload apply summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-triage-review-apply-${{ github.run_id }}
+          path: reports/
