@@ -72,6 +72,9 @@ instance/
 # Sphinx documentation
 docs/_build/
 
+# Regenerable mermaid diagram renders for docs/render_pdf.py
+docs/diagrams/
+
 # PyBuilder
 .pybuilder/
 target/
