@@ -68,7 +68,7 @@ _MENTION_RE = re.compile(
 )
 _CVSS_RE = re.compile(r"(?<!\d)(10(?:\.0)?|[0-9](?:\.\d)?)(?!\d)")
 _KERNEL_RE = re.compile(
-    r"\b(linux|linux-kernel|kernel|sys-kernel|kernel-cve)\b", re.IGNORECASE
+    r"\b(linux-kernel|kernel|sys-kernel|kernel-cve)\b", re.IGNORECASE
 )
 _STRIKETHROUGH_RE = re.compile(r"(?:~~.*?~~|~[^~]*~)", re.DOTALL)
 _OWNER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$")
@@ -326,12 +326,20 @@ def render_issue_body(
 
 
 def is_kernel_advisory(package_name: str | None, title: str | None = None) -> bool:
+    """Return true if the package name or title clearly indicates a Linux Kernel advisory.
+
+    This intentionally avoids matching generic terms like "linux" to prevent false positives
+    in case of packages like "util-linux". It also avoids matching generic terms like "kernel"
+    in the text body, to prevent false positives in case of packages like "systemd" which
+    unexpectedly contain text about Linux Kernel. The heuristic only looks for explicit
+    kernel identifiers in the package name and title.
+    """
+
     text = " ".join(part for part in [package_name, title] if part)
     if not text:
         return False
     normalized = normalize_name(package_name)
     return normalized in {
-        "linux",
         "kernel",
         "linux-kernel",
         "sys-kernel",

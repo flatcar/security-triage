@@ -68,6 +68,7 @@ def test_render_issue_body_exact_field_order():
 def test_kernel_advisory_detection():
     assert is_kernel_advisory("linux-kernel", "Linux kernel CVE")
     assert not is_kernel_advisory("openssl", "OpenSSL CVE")
+    assert not is_kernel_advisory("util-linux", "util-linux CVE")
 
 
 @pytest.mark.parametrize(
