@@ -64,7 +64,7 @@ def test_daily_workflow_triggers_are_exactly_cron_and_dispatch():
     assert "workflow_dispatch" in triggers
     assert "schedule" in triggers
     crons = [entry["cron"] for entry in triggers["schedule"]]
-    assert crons == ["0 6 * * *"]
+    assert crons == ["0 6 * * 1-5"]
 
 
 def test_daily_workflow_permissions_are_least_privilege():
