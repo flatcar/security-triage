@@ -35,14 +35,24 @@ def main(argv: list[str] | None = None) -> int:
     }
     if args.foundry_endpoint:
         values["FOUNDRY_ENDPOINT"] = args.foundry_endpoint.rstrip("/")
+
+    foundry_token: str | None = None
+    github_token: str | None = None
     if not args.skip_foundry_token:
-        values["FOUNDRY_BEARER_TOKEN"] = _azure_access_token(args.subscription, args.tenant)
+        foundry_token = _azure_access_token(args.subscription, args.tenant)
     if not args.skip_github_token:
-        values["GITHUB_TOKEN"] = _github_token()
+        github_token = _github_token()
 
     env_path = Path(args.env_file)
     updated = _write_env_values(env_path, values)
     print(f"Updated {env_path} with: {', '.join(updated)}")
+    if foundry_token is not None or github_token is not None:
+        print("Secret tokens were fetched but not written to disk.")
+        print("Set them in your current shell session instead:")
+        if foundry_token is not None:
+            print(f'export FOUNDRY_BEARER_TOKEN={_dotenv_value(foundry_token)}')
+        if github_token is not None:
+            print(f'export GITHUB_TOKEN={_dotenv_value(github_token)}')
     return 0
 
 
