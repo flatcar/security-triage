@@ -50,9 +50,9 @@ def main(argv: list[str] | None = None) -> int:
         print("Secret tokens were fetched but not written to disk.")
         print("Set them in your current shell session instead:")
         if foundry_token is not None:
-            print(f'export FOUNDRY_BEARER_TOKEN={_dotenv_value(foundry_token)}')
+            print("Set FOUNDRY_BEARER_TOKEN in your shell (value not displayed).")
         if github_token is not None:
-            print(f'export GITHUB_TOKEN={_dotenv_value(github_token)}')
+            print("Set GITHUB_TOKEN in your shell (value not displayed).")
     return 0
 
 
