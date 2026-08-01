@@ -30,6 +30,7 @@ from .prompt_cache import PromptCache
 from .reporting import (
     render_cleanup_markdown,
     render_discovery_markdown,
+    render_review_plan_markdown,
     write_document,
     write_markdown,
 )
@@ -65,6 +66,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "cleanup":
             return run_cleanup_command(args)
         if args.command == "review":
+            if args.review_command == "plan":
+                return run_review_plan_command(args)
             if args.review_command == "create":
                 return run_review_create_command(args)
             if args.review_command == "render":
@@ -248,6 +251,29 @@ def _add_review_parser(
         help="Human-gated review-issue workflow (create, local dry-run render, apply)",
     )
     review_subparsers = review.add_subparsers(dest="review_command", required=True)
+
+    review_plan = review_subparsers.add_parser(
+        "plan",
+        help="Print the human-gated security-triage workflow plan without API calls",
+    )
+    review_plan.add_argument(
+        "--advisory-repo",
+        help=(
+            "Repository whose advisory issues the workflow reads/mutates "
+            "(env: SECURITY_TRIAGE_ADVISORY_REPO); required, no implicit default"
+        ),
+    )
+    review_plan.add_argument(
+        "--review-repo",
+        help=(
+            "Repository the review issue lives/would live in "
+            "(env: SECURITY_TRIAGE_REVIEW_REPO); required, no implicit default"
+        ),
+    )
+    review_plan.add_argument(
+        "--output",
+        help="Optional Markdown output path; defaults to stdout",
+    )
 
     review_create = review_subparsers.add_parser(
         "create",
@@ -456,6 +482,23 @@ def run_cleanup_command(args: argparse.Namespace) -> int:
     print(f"wrote {args.output}")
     if args.markdown_output:
         print(f"wrote {args.markdown_output}")
+    return 0
+
+
+def run_review_plan_command(args: argparse.Namespace) -> int:
+    advisory_repo = _resolve_required_repo(
+        args.advisory_repo, "SECURITY_TRIAGE_ADVISORY_REPO", "--advisory-repo"
+    )
+    review_repo = _resolve_required_repo(
+        args.review_repo, "SECURITY_TRIAGE_REVIEW_REPO", "--review-repo"
+    )
+    _warn_if_cross_repo(advisory_repo, review_repo)
+    plan = render_review_plan_markdown(advisory_repo, review_repo)
+    if args.output:
+        write_markdown(args.output, plan)
+        print(f"wrote {args.output}")
+    else:
+        print(plan, end="")
     return 0
 
 
