@@ -107,9 +107,9 @@ def test_scheduled_workflow_analysis_steps_never_pass_mutation_flags():
         or "security-triage cleanup" in command
     ]
 
-    assert any("security-triage discovery" in command for command in analysis_commands), (
-        "expected a discovery step; cleanup is optional"
-    )
+    assert any(
+        "security-triage discovery" in command for command in analysis_commands
+    ), "expected a discovery step; cleanup is optional"
     for command in analysis_commands:
         assert "--apply-actions" not in command
         assert "--enable-create-issues" not in command
@@ -128,9 +128,9 @@ def test_scheduled_workflow_uses_foundry_model_for_analysis():
         or "security-triage cleanup" in command
     ]
 
-    assert any("security-triage discovery" in command for command in analysis_commands), (
-        "expected a discovery step; cleanup is optional"
-    )
+    assert any(
+        "security-triage discovery" in command for command in analysis_commands
+    ), "expected a discovery step; cleanup is optional"
     for command in analysis_commands:
         assert "--model foundry" in command
 
