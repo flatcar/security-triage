@@ -4,7 +4,7 @@ These tests parse the workflow YAML (not the Python `DiscoveryWorkflow`/
 `CleanupWorkflow` pipeline objects covered by ``tests/test_workflows.py``) and
 assert the safety properties the review/apply design plan requires: exact
 triggers, least-privilege permissions, concurrency configuration, OIDC only in
-the daily analysis workflow, no pull-request path ever receiving OIDC or
+the scheduled analysis workflow, no pull-request path ever receiving OIDC or
 issue-write access, the apply workflow being label-filtered and passing the
 issue number to the Python gate, and every battle-test repository reference
 resolving to this repository rather than a hard-coded `flatcar/Flatcar`.
@@ -22,7 +22,7 @@ import pytest
 yaml = pytest.importorskip("yaml")
 
 WORKFLOWS_DIR = Path(__file__).parent.parent / ".github" / "workflows"
-DAILY_WORKFLOW_PATH = WORKFLOWS_DIR / "security-triage.yml"
+SCHEDULED_WORKFLOW_PATH = WORKFLOWS_DIR / "security-triage.yml"
 APPLY_WORKFLOW_PATH = WORKFLOWS_DIR / "security-triage-apply.yml"
 
 
@@ -53,11 +53,11 @@ def _all_workflow_paths() -> list[Path]:
     return sorted(WORKFLOWS_DIR.glob("*.yml"))
 
 
-# --- Daily analysis workflow ---------------------------------------------------
+# --- Scheduled analysis workflow -----------------------------------------------
 
 
-def test_daily_workflow_triggers_are_exactly_cron_and_dispatch():
-    document = _load(DAILY_WORKFLOW_PATH)
+def test_scheduled_workflow_triggers_are_exactly_cron_and_dispatch():
+    document = _load(SCHEDULED_WORKFLOW_PATH)
     triggers = _triggers(document)
 
     assert "pull_request" not in triggers
@@ -67,8 +67,8 @@ def test_daily_workflow_triggers_are_exactly_cron_and_dispatch():
     assert crons == ["0 6 * * 1,4"]
 
 
-def test_daily_workflow_permissions_are_least_privilege():
-    document = _load(DAILY_WORKFLOW_PATH)
+def test_scheduled_workflow_permissions_are_least_privilege():
+    document = _load(SCHEDULED_WORKFLOW_PATH)
     permissions = document["permissions"]
 
     assert permissions == {"contents": "read", "issues": "write", "id-token": "write"}
@@ -77,16 +77,16 @@ def test_daily_workflow_permissions_are_least_privilege():
     )
 
 
-def test_daily_workflow_has_a_non_cancelling_concurrency_group():
-    document = _load(DAILY_WORKFLOW_PATH)
+def test_scheduled_workflow_has_a_non_cancelling_concurrency_group():
+    document = _load(SCHEDULED_WORKFLOW_PATH)
     concurrency = document["concurrency"]
 
     assert concurrency["cancel-in-progress"] is False
     assert concurrency["group"]
 
 
-def test_daily_workflow_uses_azure_oidc_login():
-    document = _load(DAILY_WORKFLOW_PATH)
+def test_scheduled_workflow_uses_azure_oidc_login():
+    document = _load(SCHEDULED_WORKFLOW_PATH)
     uses_values = [
         step.get("uses", "")
         for job in document["jobs"].values()
@@ -97,8 +97,8 @@ def test_daily_workflow_uses_azure_oidc_login():
     assert document["permissions"]["id-token"] == "write"
 
 
-def test_daily_workflow_analysis_steps_never_pass_mutation_flags():
-    document = _load(DAILY_WORKFLOW_PATH)
+def test_scheduled_workflow_analysis_steps_never_pass_mutation_flags():
+    document = _load(SCHEDULED_WORKFLOW_PATH)
     commands = _all_run_steps(document)
     analysis_commands = [
         command
@@ -107,7 +107,9 @@ def test_daily_workflow_analysis_steps_never_pass_mutation_flags():
         or "security-triage cleanup" in command
     ]
 
-    assert analysis_commands, "expected discovery and cleanup steps"
+    assert any("security-triage discovery" in command for command in analysis_commands), (
+        "expected a discovery step; cleanup is optional"
+    )
     for command in analysis_commands:
         assert "--apply-actions" not in command
         assert "--enable-create-issues" not in command
@@ -116,8 +118,8 @@ def test_daily_workflow_analysis_steps_never_pass_mutation_flags():
         assert "--enable-close-issues" not in command
 
 
-def test_daily_workflow_uses_foundry_model_for_analysis():
-    document = _load(DAILY_WORKFLOW_PATH)
+def test_scheduled_workflow_uses_foundry_model_for_analysis():
+    document = _load(SCHEDULED_WORKFLOW_PATH)
     commands = _all_run_steps(document)
     analysis_commands = [
         command
@@ -130,27 +132,27 @@ def test_daily_workflow_uses_foundry_model_for_analysis():
         assert "--model foundry" in command
 
 
-def test_daily_workflow_creates_review_issues_but_never_calls_review_apply():
-    document = _load(DAILY_WORKFLOW_PATH)
+def test_scheduled_workflow_creates_review_issues_but_never_calls_review_apply():
+    document = _load(SCHEDULED_WORKFLOW_PATH)
     commands = "\n".join(_all_run_steps(document))
 
     assert "security-triage review create" in commands
     assert "review apply" not in commands
 
 
-def test_daily_workflow_repository_configuration_is_parameterized_to_current_repo():
-    document = _load(DAILY_WORKFLOW_PATH)
+def test_scheduled_workflow_repository_configuration_is_parameterized_to_current_repo():
+    document = _load(SCHEDULED_WORKFLOW_PATH)
     env = document.get("env", {})
 
     assert env["SECURITY_TRIAGE_ADVISORY_REPO"] == "${{ github.repository }}"
     assert env["SECURITY_TRIAGE_REVIEW_REPO"] == "${{ github.repository }}"
 
-    raw_text = DAILY_WORKFLOW_PATH.read_text(encoding="utf-8")
+    raw_text = SCHEDULED_WORKFLOW_PATH.read_text(encoding="utf-8")
     assert "flatcar/Flatcar" not in raw_text
 
 
-def test_daily_workflow_foundry_bearer_token_is_masked_and_scoped():
-    raw_text = DAILY_WORKFLOW_PATH.read_text(encoding="utf-8")
+def test_scheduled_workflow_foundry_bearer_token_is_masked_and_scoped():
+    raw_text = SCHEDULED_WORKFLOW_PATH.read_text(encoding="utf-8")
     assert "::add-mask::" in raw_text
     assert "FOUNDRY_BEARER_TOKEN" in raw_text
 
@@ -281,6 +283,6 @@ def test_no_workflow_yaml_in_this_repository_references_flatcar_flatcar():
 
 
 def test_both_review_workflows_are_valid_yaml_documents():
-    for path in (DAILY_WORKFLOW_PATH, APPLY_WORKFLOW_PATH):
+    for path in (SCHEDULED_WORKFLOW_PATH, APPLY_WORKFLOW_PATH):
         document = _load(path)
         assert document["jobs"], f"{path.name} must declare at least one job"
