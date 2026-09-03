@@ -23,6 +23,7 @@ from security_triage.rules import (
 )
 from security_triage.sources import (
     SourceSpec,
+    _strip_tags,
     fetch_gentoo_entries,
     filter_entries_by_window,
     parse_feed_entries,
@@ -64,6 +65,16 @@ def test_parse_html_source_links_security_entries():
     )
     assert len(entries) == 1
     assert entries[0].source_url == "https://example.test/cve"
+
+
+def test_strip_tags_strips_scripts_and_keeps_element_boundaries_separate():
+    html = """<div>
+      Hello <strong>World</strong><script>alert('boom')</script><p>Again</p>
+      <b>and</b> <i>more</i>
+    </div>"""
+    assert _strip_tags(html) == "Hello World Again and more"
+    assert _strip_tags("<p>Hello</p><p>World</p>") == "Hello World"
+    assert _strip_tags("<p>Hello <b>World") == "Hello World"
 
 
 def test_discovery_window_prefers_published_time_over_recent_update():
