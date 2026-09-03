@@ -715,6 +715,7 @@ class _TextExtractingHTMLParser(HTMLParser):
     def handle_data(self, data: str) -> None:
         if not self._ignored_tag_stack:
             self._parts.append(data)
+
     def text(self) -> str:
         return "".join(self._parts)
 
