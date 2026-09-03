@@ -701,9 +701,7 @@ class _TextExtractingHTMLParser(HTMLParser):
         if lowered in {"script", "style"}:
             self._ignored_tag_stack.append(lowered)
 
-    def handle_startendtag(
-        self, tag: str, attrs: list[tuple[str, str | None]]
-    ) -> None:
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self._append_space()
 
     def handle_endtag(self, tag: str) -> None:
