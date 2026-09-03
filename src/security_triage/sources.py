@@ -690,20 +690,31 @@ class _TextExtractingHTMLParser(HTMLParser):
         self._ignored_tag_stack: list[str] = []
         self._parts: list[str] = []
 
+    def _append_space(self) -> None:
+        if self._parts and self._parts[-1] and self._parts[-1][-1].isspace():
+            return
+        self._parts.append(" ")
+
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         lowered = tag.lower()
+        self._append_space()
         if lowered in {"script", "style"}:
             self._ignored_tag_stack.append(lowered)
+
+    def handle_startendtag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        self._append_space()
 
     def handle_endtag(self, tag: str) -> None:
         lowered = tag.lower()
         if self._ignored_tag_stack and self._ignored_tag_stack[-1] == lowered:
             self._ignored_tag_stack.pop()
+        self._append_space()
 
     def handle_data(self, data: str) -> None:
         if not self._ignored_tag_stack:
             self._parts.append(data)
-
     def text(self) -> str:
         return "".join(self._parts)
 
