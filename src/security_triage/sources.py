@@ -723,7 +723,7 @@ def _strip_tags(text: str) -> str:
     parser = _TextExtractingHTMLParser()
     parser.feed(text)
     parser.close()
-    return re.sub(r"\s+", " ", html.unescape(parser.text())).strip()
+    return re.sub(r"\s+", " ", parser.text()).strip()
 
 
 def _looks_security_related(text: str) -> bool:
