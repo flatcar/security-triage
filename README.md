@@ -233,6 +233,15 @@ security-triage cleanup --advisory-repo flatcar/security-triage ...
 3. A maintainer reviews the issue and, when satisfied, closes it as **Completed**.
 4. `review apply` applies only the checked, conflict-free actions.
 
+To print the full local dry-run and human-gated apply sequence without making
+GitHub or model calls:
+
+```bash
+security-triage review plan \
+  --advisory-repo flatcar/security-triage \
+  --review-repo flatcar/security-triage
+```
+
 ### 1. Render a review locally (dry run, no GitHub calls)
 
 `security-triage review render` builds the exact review issue title/body(ies) from discovery/cleanup JSON documents and writes them to local Markdown files. It never constructs a GitHub client, never reads `GITHUB_TOKEN`, and never makes a network call.
