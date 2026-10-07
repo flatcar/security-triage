@@ -1,6 +1,6 @@
 name: Flatcar Security Triage
 
-# Daily discovery + cleanup analysis using Microsoft Foundry through GitHub
+# Discovery analysis using Microsoft Foundry through GitHub
 # OIDC. This workflow never mutates advisory issues directly: it only
 # produces diagnostic reports and creates human-gated review issue part(s).
 # Actual advisory mutations happen later, only when a maintainer closes a
@@ -33,6 +33,11 @@ env:
   # production repository changes only these two values.
   SECURITY_TRIAGE_ADVISORY_REPO: ${{ github.repository }}
   SECURITY_TRIAGE_REVIEW_REPO: ${{ github.repository }}
+  # Deferral affects review presentation only; full collection stays in artifacts.
+  GO_REVIEW: ${{ vars.SECURITY_TRIAGE_GO_REVIEW || 'include' }}
+  RUST_REVIEW: ${{ vars.SECURITY_TRIAGE_RUST_REVIEW || 'include' }}
+  # Inspect the compact shadow artifact before opting scheduled reviews in.
+  REVIEW_DETAIL: ${{ vars.SECURITY_TRIAGE_REVIEW_DETAIL || 'full' }}
 
 jobs:
   daily-analysis:
@@ -93,9 +98,23 @@ jobs:
           security-triage discovery \
             --model foundry \
             --advisory-repo "$SECURITY_TRIAGE_ADVISORY_REPO" \
+            --feedback-review-repo "$SECURITY_TRIAGE_REVIEW_REPO" \
             --output reports/discovery.json \
             --markdown-output reports/discovery.md \
             --debug-log reports/discovery-debug.jsonl
+
+      - name: Render compact shadow review (read-only)
+        run: |
+          security-triage review render \
+            --discovery-json reports/discovery.json \
+            --advisory-repo "$SECURITY_TRIAGE_ADVISORY_REPO" \
+            --review-repo "$SECURITY_TRIAGE_REVIEW_REPO" \
+            --run-id "${{ github.run_id }}" \
+            --review-detail compact \
+            --go-review "$GO_REVIEW" \
+            --rust-review "$RUST_REVIEW" \
+            --enable-feedback \
+            --output-dir reports/review-shadow
 
       - name: Save prompt cache
         if: always()
@@ -118,10 +137,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
+          feedback_args=()
+          if [[ "$REVIEW_DETAIL" == compact ]]; then
+            feedback_args+=(--enable-feedback)
+          fi
           security-triage review create \
             --discovery-json reports/discovery.json \
             --advisory-repo "$SECURITY_TRIAGE_ADVISORY_REPO" \
             --review-repo "$SECURITY_TRIAGE_REVIEW_REPO" \
+            --review-detail "$REVIEW_DETAIL" \
+            --go-review "$GO_REVIEW" \
+            --rust-review "$RUST_REVIEW" \
+            "${feedback_args[@]}" \
             --run-id "${{ github.run_id }}" \
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --commit-sha "${{ github.sha }}" \

@@ -12,10 +12,11 @@ from .http_utils import HTTPError, fetch_json, open_request
 from .io_utils import load_structured_file
 from .records import Issue, ParsedIssue
 from .rules import (
+    REVIEW_LABEL,
     active_markdown_text,
     advisory_issue_query,
     extract_cves,
-    normalize_name,
+    package_identities_match,
     parse_cvss_scores,
     validate_repo_name,
 )
@@ -31,6 +32,14 @@ class GitHubConfigError(RuntimeError):
     pass
 
 
+class GitHubIssuePage(list[Issue]):
+    """A filtered issue page retaining raw row count for safe pagination."""
+
+    def __init__(self, issues: list[Issue], raw_count: int) -> None:
+        super().__init__(issues)
+        self.raw_count = raw_count
+
+
 class GitHubIssueClient:
     def __init__(self, repo: str = "flatcar/Flatcar", token: str | None = None) -> None:
         self.repo = validate_repo_name(repo)
@@ -39,6 +48,14 @@ class GitHubIssueClient:
 
     def fetch_open_advisory_issues(self, query: str | None = None) -> list[Issue]:
         return self._search_issues(query or advisory_issue_query(self.repo))
+
+    def fetch_open_update_issues(self) -> list[Issue]:
+        """List current package-update candidates, including ordinary unlabeled issues."""
+        return [
+            issue
+            for issue in self.list_issues(state="open")
+            if issue.state == "open" and is_package_update_issue(issue)
+        ]
 
     def _search_issues(self, query: str) -> list[Issue]:
         issues: list[Issue] = []
@@ -82,19 +99,25 @@ class GitHubIssueClient:
         same-run idempotency and duplicate checks that must observe an issue
         created moments earlier in the same workflow run.
         """
+        return self.list_issues(state=state, label=label)
+
+    def list_issues(self, state: str = "open", label: str | None = None) -> list[Issue]:
+        """Read immediately consistent repository issues, including unlabeled updates."""
         issues: list[Issue] = []
         page = 1
         while True:
-            encoded = urllib.parse.urlencode(
-                {"labels": label, "state": state, "per_page": "100", "page": str(page)}
-            )
+            params = {}
+            if label is not None:
+                params["labels"] = label
+            params.update({"state": state, "per_page": "100", "page": str(page)})
+            encoded = urllib.parse.urlencode(params)
             payload = fetch_json(
                 f"{self.api_base}/repos/{self.repo}/issues?{encoded}",
                 token=self.token,
                 accept="application/vnd.github+json",
             )
             if not isinstance(payload, list):
-                break
+                raise HTTPError("GitHub Issues List returned a non-list response")
             issues.extend(
                 issue_from_api(item) for item in payload if "pull_request" not in item
             )
@@ -120,6 +143,60 @@ class GitHubIssueClient:
                 break
             page += 1
         return comments
+
+    def list_issues_page(
+        self,
+        *,
+        state: str = "closed",
+        label: str | None = REVIEW_LABEL,
+        page: int = 1,
+        per_page: int = 100,
+    ) -> GitHubIssuePage:
+        """Read one bounded issue page; raw_count includes filtered pull requests."""
+        _validate_page(page, per_page)
+        params = {
+            "state": state,
+            "page": str(page),
+            "per_page": str(per_page),
+            "sort": "updated",
+            "direction": "desc",
+        }
+        if label is not None:
+            params["labels"] = label
+        payload = fetch_json(
+            f"{self.api_base}/repos/{self.repo}/issues?{urllib.parse.urlencode(params)}",
+            token=self.token,
+            accept="application/vnd.github+json",
+        )
+        if not isinstance(payload, list) or not all(
+            isinstance(item, dict) for item in payload
+        ):
+            raise HTTPError("GitHub Issues List returned a malformed page")
+        return GitHubIssuePage(
+            [issue_from_api(item) for item in payload if "pull_request" not in item],
+            raw_count=len(payload),
+        )
+
+    def list_comments_page(
+        self,
+        issue_number: int,
+        *,
+        page: int,
+        per_page: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Read exactly one comment page without changing unbounded callers."""
+        _validate_page(page, per_page)
+        params = urllib.parse.urlencode({"page": str(page), "per_page": str(per_page)})
+        payload = fetch_json(
+            f"{self.api_base}/repos/{self.repo}/issues/{issue_number}/comments?{params}",
+            token=self.token,
+            accept="application/vnd.github+json",
+        )
+        if not isinstance(payload, list) or not all(
+            isinstance(item, dict) for item in payload
+        ):
+            raise HTTPError("GitHub Comments List returned a malformed page")
+        return cast(list[dict[str, Any]], payload)
 
     def ensure_label_exists(
         self, name: str, color: str = "6f42c1", description: str = ""
@@ -191,6 +268,16 @@ class GitHubIssueClient:
             ),
         )
 
+    def update_comment(self, comment_id: int, body: str) -> dict[str, Any]:
+        return cast(
+            dict[str, Any],
+            self._request_json(
+                "PATCH",
+                f"/repos/{self.repo}/issues/comments/{comment_id}",
+                {"body": body},
+            ),
+        )
+
     def close_issue(self, issue_number: int) -> dict[str, Any]:
         return cast(
             dict[str, Any],
@@ -240,6 +327,16 @@ def load_issue_fixture(path: str) -> list[Issue]:
             "Issue fixture must be a list or an object with an 'issues' list"
         )
     return [issue_from_api(item) for item in items]
+
+
+def _validate_page(page: int, per_page: int) -> None:
+    if (
+        type(page) is not int
+        or page < 1
+        or type(per_page) is not int
+        or not 1 <= per_page <= 100
+    ):
+        raise ValueError("GitHub pagination requires page >= 1 and per_page in 1..100")
 
 
 def issue_from_api(item: dict[str, Any]) -> Issue:
@@ -312,25 +409,41 @@ def issue_package_from_title(title: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
+def is_package_update_issue(issue: Issue) -> bool:
+    return REVIEW_LABEL not in issue.labels and (
+        {"advisory", "security"}.issubset(issue.labels)
+        or issue_package_from_title(issue.title) is not None
+    )
+
+
 def find_existing_issue_matches(
     extraction: dict[str, Any], issues: list[Issue]
 ) -> list[dict[str, Any]]:
-    package_name = extraction.get("package_name") or ""
-    normalized_package = normalize_name(package_name)
+    package_name = (
+        extraction.get("package_purl")
+        or extraction.get("package_identity")
+        or extraction.get("package_name")
+        or ""
+    )
     cves = set(extraction.get("cves") or [])
     matches: list[dict[str, Any]] = []
     for issue in issues:
+        if not is_package_update_issue(issue):
+            continue
         parsed = parse_issue_body(issue.body)
-        issue_package = parsed.name or issue_package_from_title(issue.title) or ""
-        normalized_issue_package = normalize_name(issue_package)
+        issue_package = (
+            parsed.name
+            if parsed.name is not None
+            else issue_package_from_title(issue.title) or ""
+        )
         issue_cves = set(parsed.cves)
         reasons: list[str] = []
-        if (
-            normalized_package
-            and normalized_issue_package
-            and normalized_package == normalized_issue_package
-        ):
+        if package_identities_match(package_name, issue_package):
             reasons.append("package_name")
+        if not reasons:
+            # A shared identifier can affect multiple packages. It is evidence,
+            # never authorization to mutate a different package's issue.
+            continue
         if cves and issue_cves and cves.intersection(issue_cves):
             reasons.append("cve_overlap")
         if not reasons:

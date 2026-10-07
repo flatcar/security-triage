@@ -51,6 +51,134 @@ def test_discovery_default_window_days_is_seven():
     assert args.window_days == 7
 
 
+def test_review_presentation_controls_do_not_disable_discovery():
+    args = cli.build_parser().parse_args(
+        [
+            "review",
+            "render",
+            "--go-review",
+            "defer",
+            "--rust-review",
+            "include",
+            "--enable-feedback",
+        ]
+    )
+    assert args.review_detail == "compact"
+    assert args.go_review == "defer"
+    assert args.rust_review == "include"
+    assert args.enable_feedback is True
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["discovery", "--go-review", "defer"])
+
+
+def test_feedback_reads_are_opt_in_and_offline_replay_is_exclusive():
+    parser = cli.build_parser()
+    args = parser.parse_args(["discovery"])
+    assert args.feedback_review_repo is None
+    assert args.feedback_fixture is None
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "discovery",
+                "--feedback-review-repo",
+                "flatcar/security-triage",
+                "--feedback-fixture",
+                "feedback.json",
+            ]
+        )
+
+
+def test_discovery_scope_snapshots_have_provenance_and_are_not_cleanup_inputs():
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "discovery",
+            "--sdk-sbom-fixture",
+            str(FIXTURES / "sbom.json"),
+            "--sysext-sbom-fixture",
+            str(FIXTURES / "sbom.json"),
+        ]
+    )
+    evidence = cli._load_discovery_scope_evidence(args)
+    assert {entry["scope"] for entry in evidence} == {"sdk_only", "sysext"}
+    assert all(entry["validated"] is True for entry in evidence)
+    assert all(entry["snapshot_source"].startswith("file:") for entry in evidence)
+    assert all(len(entry["snapshot_sha256"]) == 64 for entry in evidence)
+    assert all(entry["discovery_only"] is True for entry in evidence)
+    with pytest.raises(SystemExit):
+        parser.parse_args(["cleanup", "--sdk-sbom-fixture", "sdk.json"])
+
+
+def test_discovery_scope_snapshot_rejects_missing_spdx_metadata(tmp_path):
+    path = tmp_path / "not-spdx.json"
+    path.write_text('{"packages": [{"name": "bubblewrap", "versionInfo": "1.0"}]}')
+    args = cli.build_parser().parse_args(["discovery", "--sdk-sbom-fixture", str(path)])
+    with pytest.raises(ValueError, match="SPDX version"):
+        cli._load_discovery_scope_evidence(args)
+
+
+def test_ambiguous_scope_snapshot_does_not_supply_trusted_proof(tmp_path):
+    path = tmp_path / "sdk.json"
+    path.write_text(
+        json.dumps(
+            {
+                "spdxVersion": "SPDX-2.3",
+                "packages": [
+                    {"name": "bubblewrap", "versionInfo": "1.0"},
+                    {"name": "bubblewrap", "versionInfo": "2.0"},
+                ],
+            }
+        )
+    )
+    args = cli.build_parser().parse_args(["discovery", "--sdk-sbom-fixture", str(path)])
+    assert cli._load_discovery_scope_evidence(args) == []
+
+
+def test_cli_fixed_production_does_not_hide_affected_sdk(tmp_path):
+    sdk_path = tmp_path / "sdk.json"
+    sdk_path.write_text(
+        json.dumps(
+            {
+                "spdxVersion": "SPDX-2.3",
+                "packages": [
+                    {
+                        "name": "openssl",
+                        "versionInfo": "3.2.3",
+                        "SPDXID": "SPDXRef-sdk-openssl",
+                    }
+                ],
+            }
+        )
+    )
+    output = tmp_path / "discovery.json"
+    assert (
+        main(
+            [
+                "discovery",
+                "--quiet",
+                "--source-fixture",
+                str(FIXTURES / "discovery_entries.json"),
+                "--issues-fixture",
+                str(FIXTURES / "github_issues.json"),
+                "--sbom-fixture",
+                str(FIXTURES / "sbom.json"),
+                "--sdk-sbom-fixture",
+                str(sdk_path),
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    record = next(
+        record
+        for record in json.loads(output.read_text())["records"]
+        if record["llm_extraction"]["package_name"] == "openssl"
+    )
+    assert record["scope_evidence"][0]["versionInfo"] == "3.2.3"
+    assert record["decision"]["action"] in {"needs_manual_review", "create_issue"}
+
+
 def test_discovery_accepts_source_cache_flags():
     args = build_parser().parse_args(
         [
@@ -337,6 +465,7 @@ class _FakeReviewClient:
             "html_url": f"https://github.com/{self.repo}/issues/{number}",
             "state": state,
             "state_reason": state_reason,
+            "user": {"login": "github-actions[bot]", "type": "Bot"},
         }
         self._comments.setdefault(number, [])
         self._next_number = max(self._next_number, number + 1)
@@ -357,6 +486,14 @@ class _FakeReviewClient:
             for item in self._issues.values()
             if label in {entry["name"] for entry in item["labels"]}
             and (state == "all" or item["state"] == state)
+        ]
+
+    def list_issues(self, state: str = "open", label: str | None = None):
+        return [
+            issue_from_api(item)
+            for item in self._issues.values()
+            if (state == "all" or item["state"] == state)
+            and (label is None or label in {entry["name"] for entry in item["labels"]})
         ]
 
     def list_comments(self, issue_number: int):
@@ -386,9 +523,13 @@ class _FakeReviewClient:
         return {"number": issue_number}
 
     def post_comment(self, issue_number: int, body: str):
+        comment_id = len(self._comments.setdefault(issue_number, [])) + 1
         comment = {
-            "id": len(self._comments.setdefault(issue_number, [])) + 1,
+            "id": comment_id,
             "body": body,
+            "user": {"login": "github-actions[bot]", "type": "Bot"},
+            "html_url": f"https://github.com/{self.repo}/issues/{issue_number}#issuecomment-{comment_id}",
+            "created_at": "2026-10-07T12:00:00Z",
         }
         self._comments[issue_number].append(comment)
         return comment
@@ -408,6 +549,97 @@ def fake_review_client(monkeypatch):
 
     monkeypatch.setattr(cli, "GitHubIssueClient", factory)
     return clients
+
+
+def test_cli_feedback_round_trip_is_separate_from_advisory_mutations(
+    tmp_path, fake_review_client
+):
+    from security_triage.feedback import FEEDBACK_KIND
+    from security_triage.review import extract_manifest
+
+    repo = "flatcar/security-triage"
+    discovery_path = tmp_path / "discovery.json"
+    discovery_args = [
+        "discovery",
+        "--quiet",
+        "--source-fixture",
+        str(FIXTURES / "discovery_entries.json"),
+        "--issues-fixture",
+        str(FIXTURES / "github_issues.json"),
+        "--sbom-fixture",
+        str(FIXTURES / "sbom.json"),
+        "--advisory-repo",
+        repo,
+        "--output",
+        str(discovery_path),
+    ]
+    assert main(discovery_args) == 0
+    create_path = tmp_path / "created.json"
+    assert (
+        main(
+            [
+                "review",
+                "create",
+                "--quiet",
+                "--discovery-json",
+                str(discovery_path),
+                "--advisory-repo",
+                repo,
+                "--review-repo",
+                repo,
+                "--run-id",
+                "feedback-roundtrip",
+                "--review-detail",
+                "full",
+                "--enable-feedback",
+                "--output",
+                str(create_path),
+            ]
+        )
+        == 0
+    )
+    number = json.loads(create_path.read_text())["parts"][0]["issue_number"]
+    client = fake_review_client[repo]
+    review = client._issues[number]
+    manifest = extract_manifest(review["body"])
+    action = next(
+        action
+        for group in manifest["groups"]
+        for action in group["actions"]
+        if action["kind"] == FEEDBACK_KIND
+        and action["payload"]["decision"] == "wrong_package"
+    )
+    marker = f"<!-- security-triage:action-id:{action['action_id']} -->"
+    review["body"] = "\n".join(
+        line.replace("[ ]", "[x]") if marker in line else line
+        for line in review["body"].splitlines()
+    )
+    review["state"] = "closed"
+    review["state_reason"] = "completed"
+    before = len(client._issues)
+    assert (
+        main(
+            [
+                "review",
+                "apply",
+                "--quiet",
+                "--issue-number",
+                str(number),
+                "--advisory-repo",
+                repo,
+                "--review-repo",
+                repo,
+                "--output",
+                str(tmp_path / "applied.json"),
+            ]
+        )
+        == 0
+    )
+    assert len(client._issues) == before
+    assert main(discovery_args + ["--feedback-review-repo", repo]) == 0
+    result = json.loads(discovery_path.read_text())
+    assert result["summary"]["confirmed_feedback_suppressions"] == 1
+    assert all(record.get("decision") for record in result["records"])
 
 
 def test_cli_review_create_then_apply_end_to_end(tmp_path, fake_review_client):

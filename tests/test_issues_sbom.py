@@ -20,6 +20,108 @@ from security_triage.sbom import (
     load_sbom_fixture,
 )
 
+
+def test_list_all_issues_uses_consistent_endpoint_without_label_filter(monkeypatch):
+    urls = []
+
+    def fetch(url, **kwargs):
+        urls.append(url)
+        return [
+            {"number": 430, "title": "update: expat", "labels": []},
+            {"number": 431, "title": "a pull request", "pull_request": {}},
+        ]
+
+    monkeypatch.setattr(issues_module, "fetch_json", fetch)
+    client = GitHubIssueClient("flatcar/security-triage")
+    assert [issue.number for issue in client.list_issues()] == [430]
+    assert "/repos/flatcar/security-triage/issues?" in urls[0]
+    assert "labels=" not in urls[0] and "/search/" not in urls[0]
+
+
+def test_list_all_issues_fails_closed_on_malformed_response(monkeypatch):
+    monkeypatch.setattr(issues_module, "fetch_json", lambda *args, **kwargs: {})
+    with pytest.raises(HTTPError):
+        GitHubIssueClient("flatcar/security-triage").list_issues()
+
+
+def test_fetch_open_update_issues_includes_ordinary_updates_not_review_issues(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        issues_module,
+        "fetch_json",
+        lambda *args, **kwargs: [
+            {"number": 430, "title": "update: expat", "labels": []},
+            {"number": 431, "title": "review", "labels": ["security-triage/review"]},
+            {
+                "number": 432,
+                "title": "security advisory",
+                "labels": ["advisory", "security"],
+            },
+            {"number": 433, "title": "unrelated", "body": "Name: expat", "labels": []},
+        ],
+    )
+    assert [
+        issue.number for issue in GitHubIssueClient().fetch_open_update_issues()
+    ] == [430, 432]
+
+
+def test_update_comment_uses_repository_comment_endpoint(monkeypatch):
+    client = GitHubIssueClient("flatcar/security-triage")
+    requests = []
+
+    def request(method, path, payload):
+        requests.append((method, path, payload))
+        return {"id": 146}
+
+    monkeypatch.setattr(client, "_request_json", request)
+    assert client.update_comment(146, "execution snapshot") == {"id": 146}
+    assert requests == [
+        (
+            "PATCH",
+            "/repos/flatcar/security-triage/issues/comments/146",
+            {"body": "execution snapshot"},
+        )
+    ]
+
+
+def test_bounded_issue_page_retains_raw_count_after_filtering_pull_requests(
+    monkeypatch,
+):
+    urls = []
+
+    def fetch(url, **kwargs):
+        urls.append(url)
+        return [{"number": 1}, {"number": 2, "pull_request": {}}]
+
+    monkeypatch.setattr(issues_module, "fetch_json", fetch)
+    page = GitHubIssueClient().list_issues_page(page=2, per_page=2)
+    assert [issue.number for issue in page] == [1]
+    assert page.raw_count == 2
+    assert len(urls) == 1 and "page=2&per_page=2" in urls[0]
+
+
+def test_bounded_comment_page_does_not_request_following_pages(monkeypatch):
+    urls = []
+
+    def fetch(url, **kwargs):
+        urls.append(url)
+        return [{"id": 1}, {"id": 2}]
+
+    monkeypatch.setattr(issues_module, "fetch_json", fetch)
+    assert len(GitHubIssueClient().list_comments_page(146, page=3, per_page=2)) == 2
+    assert len(urls) == 1 and "/issues/146/comments?page=3&per_page=2" in urls[0]
+
+
+@pytest.mark.parametrize("page,per_page", [(0, 100), (1, 101), (True, 100), (1, 0)])
+def test_bounded_page_parameters_are_validated(page, per_page):
+    client = GitHubIssueClient()
+    with pytest.raises(ValueError):
+        client.list_issues_page(page=page, per_page=per_page)
+    with pytest.raises(ValueError):
+        client.list_comments_page(146, page=page, per_page=per_page)
+
+
 FIXTURES = Path(__file__).parent / "fixtures"
 
 

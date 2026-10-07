@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 from .console import NullProgressLogger, ProgressLogger
@@ -15,6 +16,7 @@ from .rules import (
     advisory_issue_query,
     cleanup_comment_body,
     coerce_cleanup_review,
+    is_kernel_advisory,
     min_confidence,
     validate_cleanup_document,
     validate_repo_name,
@@ -24,6 +26,7 @@ from .sbom import (
     evaluate_fixed_version_requirements,
     extract_fixed_version_requirement,
     extract_fixed_version_requirements,
+    fixed_version_coverage,
     fixed_version_requirements_are_alternatives,
 )
 from .time_utils import iso_now
@@ -80,6 +83,8 @@ class CleanupWorkflow:
             "generated_at": iso_now(),
             "target_repo": self.target_repo,
             "sbom_url": FLATCAR_PRODUCTION_SBOM_URL,
+            "sbom_metadata": self.sbom_index.metadata,
+            "sbom_snapshot_sha256": self.sbom_index.metadata["snapshot_sha256"],
             "issue_query": advisory_issue_query(self.target_repo),
             "records": records,
             "errors": errors,
@@ -99,6 +104,9 @@ class CleanupWorkflow:
         fixed_versions = extract_fixed_version_requirements(action_needed)
         fixed_version = extract_fixed_version_requirement(action_needed)
         alternatives = fixed_version_requirements_are_alternatives(action_needed)
+        coverage = fixed_version_coverage(
+            action_needed, cves, parsed_issue.get("summary")
+        )
         if len(fixed_versions) > 1 and alternatives:
             self.progress_logger.info(
                 f"Issue #{issue.number} fixed-version requirements (OR alternatives): {', '.join(fixed_versions)}"
@@ -123,6 +131,26 @@ class CleanupWorkflow:
                 sbom_matches,
             )
         )
+        blockers = list(coverage["reasons"])
+        if (
+            self.sbom_index.metadata.get("source_url", FLATCAR_PRODUCTION_SBOM_URL)
+            != FLATCAR_PRODUCTION_SBOM_URL
+        ):
+            blockers.append(
+                "SBOM provenance is not the configured current production release; repository main is not remediation proof."
+            )
+        if not parsed_issue.get("valid"):
+            blockers.append(
+                "Issue fields are invalid; model normalization cannot supply cleanup proof."
+            )
+        if is_kernel_advisory(package_name, issue.title):
+            blockers.append(
+                "Kernel advisories belong to the regular kernel update flow."
+            )
+        if blockers:
+            preliminary_status = "needs_manual_review"
+            preliminary_reasons = [*preliminary_reasons, *blockers]
+            version_comparison = None
         self.progress_logger.info(
             f"Issue #{issue.number} preliminary status: {preliminary_status}"
         )
@@ -135,6 +163,8 @@ class CleanupWorkflow:
             preliminary_status,
             preliminary_reasons,
             version_comparison,
+            sbom_metadata=self.sbom_index.metadata,
+            cve_coverage=coverage,
         )
         self.debug_logger.log(
             "cleanup_evidence_bundle", issue=issue.number, bundle=evidence_bundle
@@ -161,9 +191,21 @@ class CleanupWorkflow:
             "package_from_issue": package_name,
             "labels": issue.labels,
             "sbom_url": FLATCAR_PRODUCTION_SBOM_URL,
+            "sbom_snapshot_sha256": self.sbom_index.metadata["snapshot_sha256"],
+            "issue_body_sha256": hashlib.sha256(issue.body.encode()).hexdigest(),
             "cves_from_issue": cves,
             "fixed_version_requirement": fixed_version,
             "fixed_version_requirements": fixed_versions,
+            "cve_coverage": coverage,
+            "version_comparison": version_comparison,
+            "confidence_dimensions": {
+                "identity": "high"
+                if len(sbom_matches) == 1
+                and sbom_matches[0].get("match_type") in {"exact_name", "exact_purl"}
+                else "low",
+                "remediation": confidence,
+                "cve_coverage": "high" if coverage["complete"] else "low",
+            },
             "sbom_package_matches": sbom_matches,
             "llm_review": llm_review,
             "status": status,
@@ -207,19 +249,10 @@ def _parse_or_normalize_issue(
     if parsed.valid and data.get("name"):
         return data
     normalized = model_client.normalize_issue(issue)
-    merged = {
-        "name": normalized.get("name") or data.get("name"),
-        "cves": normalized.get("cves") or data.get("cves") or [],
-        "cvss_scores": normalized.get("cvss_scores") or data.get("cvss_scores") or [],
-        "action_needed": normalized.get("action_needed") or data.get("action_needed"),
-        "summary": normalized.get("summary") or data.get("summary"),
-        "gentoo_ref": normalized.get("gentoo_ref") or data.get("gentoo_ref"),
-        "valid": bool(normalized.get("valid")) or parsed.valid,
-        "missing_fields": normalized.get("missing_fields")
-        or data.get("missing_fields")
-        or [],
-    }
-    return merged
+    # Suggestions remain visible to reviewers, but cannot invent a package,
+    # drop a CVE, or replace an unresolved action with a model-proposed version.
+    data["normalization_suggestion"] = normalized
+    return data
 
 
 def _preliminary_cleanup_status(
@@ -229,11 +262,20 @@ def _preliminary_cleanup_status(
     sbom_matches: list[dict[str, Any]],
 ) -> tuple[str, list[str], dict[str, Any] | None]:
     reasons: list[str] = []
-    if "advisory/only-sdk" in labels:
+    explicit_scopes = {
+        evidence.get("scope")
+        for match in sbom_matches
+        for evidence in match.get("scope_evidence", [])
+        if evidence.get("validated") is True
+        and not evidence.get("discovery_only")
+        and evidence.get("spdx_id")
+        and evidence["spdx_id"] == match.get("SPDXID")
+    }
+    if "advisory/only-sdk" in labels and "sdk_only" not in explicit_scopes:
         reasons.append(
             "Issue is SDK-only; production SBOM alone is insufficient cleanup evidence."
         )
-    if "advisory/sysext" in labels:
+    if "advisory/sysext" in labels and "sysext" not in explicit_scopes:
         reasons.append(
             "Issue is sysext-scoped; production SBOM alone may not prove sysext remediation."
         )
@@ -281,29 +323,6 @@ def _finalize_cleanup_status(
     reasons = [*preliminary_reasons, *llm_review.get("reasons", [])]
     llm_decision = llm_review.get("decision")
     if preliminary_status == "needs_manual_review":
-        if (
-            llm_decision == "not_remediated_in_current_production_sbom"
-            and llm_review.get("confidence") in {"high", "medium"}
-            and _can_use_model_override_for_ambiguity(preliminary_reasons)
-        ):
-            return (
-                "not_remediated_in_current_production_sbom",
-                min_confidence("medium", llm_review.get("confidence")),
-                reasons,
-            )
-        if (
-            llm_decision == "remediated_in_current_production_sbom"
-            and llm_review.get("confidence") in {"high", "medium", "low"}
-            and _can_use_model_override_for_ambiguity(preliminary_reasons)
-        ):
-            return (
-                "remediated_in_current_production_sbom",
-                "low",
-                [
-                    *reasons,
-                    "Model cleanup review affirmed remediation despite deterministic ambiguity; downgrade confidence to low.",
-                ],
-            )
         return "needs_manual_review", "low", reasons
     if preliminary_status == "remediated_in_current_production_sbom":
         if llm_decision == "remediated_in_current_production_sbom" and llm_review.get(
@@ -334,22 +353,6 @@ def _finalize_cleanup_status(
             )
             return preliminary_status, confidence, reasons
     return "needs_manual_review", "low", reasons
-
-
-def _can_use_model_override_for_ambiguity(preliminary_reasons: list[str]) -> bool:
-    if not preliminary_reasons:
-        return False
-    hard_blocker_fragments = [
-        "SDK-only",
-        "sysext-scoped",
-        "does not contain a parseable fixed-version requirement",
-        "Package was not found",
-    ]
-    return not any(
-        fragment in reason
-        for reason in preliminary_reasons
-        for fragment in hard_blocker_fragments
-    )
 
 
 def _recommended_action(status: str) -> str:

@@ -12,6 +12,8 @@ def build_discovery_evidence_bundle(
     extraction: dict[str, Any],
     sbom_matches: list[dict[str, Any]],
     existing_issue_matches: list[dict[str, Any]],
+    scope_evidence: list[dict[str, Any]] | None = None,
+    sbom_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "record_id": record_id,
@@ -31,12 +33,18 @@ def build_discovery_evidence_bundle(
         },
         "llm_extraction": extraction,
         "sbom_package_matches": sbom_matches,
+        "scope_evidence": scope_evidence or [],
+        "sbom_metadata": sbom_metadata or {},
+        "evidence_validation": extraction.get("evidence_validation", {}),
+        "confidence_dimensions": extraction.get("confidence_dimensions", {}),
         "sbom_match_review": _sbom_match_review(sbom_matches),
         "existing_issue_matches": existing_issue_matches,
         "official_rules_summary": [
             "Track Flatcar-relevant server packages only.",
             "Do not track desktop stacks or unrelated Ruby/Node/application ecosystem issues without Flatcar evidence.",
-            "Production SBOM evidence is strong production-image evidence; SDK and sysext scopes need labels and explicit evidence.",
+            "Exact identity in the production SBOM supports production presence, not affectedness; SDK and sysext scopes need explicit validated scope evidence.",
+            "Absence and unrelated substring matches do not prove not_shipped; keep unknown and ask for package/scope evidence.",
+            "A matching component name or LLM assertion cannot override ecosystem, OS, architecture, build/USE-flag, or affected-version constraints.",
             "Kernel CVEs must use kernel_regular_update_flow.",
             "Prefer needs_manual_review when Flatcar relevance, versions, or duplicate state are ambiguous.",
         ],
@@ -53,8 +61,8 @@ def _sbom_match_review(sbom_matches: list[dict[str, Any]]) -> dict[str, Any]:
         "weak_match_count": len(weak_matches),
         "instruction": (
             "If SBOM package candidates are weak substring matches, judge whether they are genuinely the same "
-            "package/component/ecosystem as the extracted advisory package. Unrelated weak matches are strong "
-            "evidence that the advisory package is not shipped in the production SBOM."
+            "package/component/ecosystem as the extracted advisory package. Weak matches never prove "
+            "production presence; unrelated or absent matches leave shipping scope unknown."
         ),
     }
 
@@ -68,6 +76,9 @@ def build_cleanup_evidence_bundle(
     preliminary_status: str,
     preliminary_reasons: list[str],
     version_comparison: dict[str, Any] | None,
+    *,
+    sbom_metadata: dict[str, Any] | None = None,
+    cve_coverage: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "issue": {
@@ -78,6 +89,8 @@ def build_cleanup_evidence_bundle(
         },
         "parsed_issue": parsed_issue,
         "sbom_url": FLATCAR_PRODUCTION_SBOM_URL,
+        "sbom_metadata": sbom_metadata or {},
+        "cve_coverage": cve_coverage or {},
         "fixed_version_requirement": fixed_version_requirement,
         "fixed_version_requirements": fixed_version_requirements,
         "sbom_package_matches": sbom_matches,
@@ -89,5 +102,6 @@ def build_cleanup_evidence_bundle(
             "Remediated requires fixed-version requirement, reliable SBOM match, clear simple version comparison at or above requirement, all CVEs covered, and no SDK/sysext-only uncertainty.",
             "SDK-only and sysext-only issues need explicit scope evidence before closure.",
             "Prefer needs_manual_review over false cleanup.",
+            "Repository main, proposed updates, and model normalization are not release-remediation evidence.",
         ],
     }

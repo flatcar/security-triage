@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -23,16 +24,56 @@ def write_markdown(path: str | Path, content: str) -> None:
     Path(path).write_text(content, encoding="utf-8")
 
 
+def summarize_discovery(document: dict[str, Any]) -> dict[str, Any]:
+    records = document.get("records") or []
+    recommendations = Counter(
+        record.get("decision", {}).get("action") or "unknown" for record in records
+    )
+    return {
+        "records": len(records),
+        "sources": dict(
+            sorted(Counter(r.get("source") or "unknown" for r in records).items())
+        ),
+        "recommendations": dict(sorted(recommendations.items())),
+        "confirmed_feedback_suppressions": sum(
+            (record.get("review_suppression") or {}).get("suppressed") is True
+            for record in records
+        ),
+        "errors": len(document.get("errors") or []),
+    }
+
+
 def render_discovery_markdown(document: dict[str, Any]) -> str:
+    summary = summarize_discovery(document)
     lines = [
         "# Flatcar Vulnerability Discovery Dry Run",
         "",
         f"Generated: {document.get('generated_at')}",
         f"Target repo: {document.get('target_repo')}",
         "",
-        "## Decisions",
+        "## Coverage",
+        "",
+        f"- Source records: {summary['records']}",
+        f"- Confirmed-feedback suppressions: {summary['confirmed_feedback_suppressions']} (retained below)",
+        f"- Errors: {summary['errors']}",
+        "- Counts describe recommendations, not reviewer approvals or a false-positive rate.",
+        "",
+        "| Recommendation | Records |",
+        "| --- | ---: |",
+        *[
+            f"| {action} | {count} |"
+            for action, count in summary["recommendations"].items()
+        ],
         "",
     ]
+    if document.get("feedback_coverage"):
+        coverage = document["feedback_coverage"]
+        lines.append(f"- Feedback history complete: {coverage.get('complete')}")
+        lines.extend(
+            f"- Feedback warning: {warning}" for warning in coverage.get("warnings", [])
+        )
+        lines.append("")
+    lines.extend(["## Decisions", ""])
     if not document.get("records"):
         lines.append("No source entries were processed.")
     for record in document.get("records", []):
@@ -115,6 +156,13 @@ def render_discovery_markdown(document: dict[str, Any]) -> str:
             lines.append(
                 f"- Manual review: {'; '.join(record.get('manual_review_reasons') or [])}"
             )
+        if record.get("review_suppression"):
+            lines.append(
+                f"- Confirmed reviewer feedback: {record['review_suppression']}"
+            )
+        if record.get("next_steps"):
+            lines.extend(["", "Reviewer questions / next steps:"])
+            lines.extend(f"- {step}" for step in record["next_steps"])
         lines.append("")
     if document.get("errors"):
         lines.extend(["## Errors", ""])

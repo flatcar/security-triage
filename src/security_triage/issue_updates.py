@@ -11,6 +11,10 @@ _FIELD_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 _URL_RE = re.compile(r"https?://[^\s,)\]>]+")
+_IDENTIFIER_RE = re.compile(
+    r"\b(?:CVE-\d{4}-\d{4,}|GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}|RUSTSEC-\d{4}-\d{4})\b",
+    re.IGNORECASE,
+)
 _PLACEHOLDERS = {"", "TBD", "N/A", "NONE"}
 
 
@@ -83,6 +87,16 @@ def removal_guard_violations(
     if not _is_placeholder(summary) and _compact(summary) not in _compact(updated_body):
         violations.append("existing Summary content would be removed")
 
+    updated_text = _compact(updated_body)
+    for line in existing_body.splitlines():
+        match = _FIELD_LINE_RE.match(line)
+        content = match.group("value") if match else line
+        if _is_placeholder(content):
+            continue
+        if _compact(content) not in updated_text:
+            violations.append("existing human-written content would be removed")
+            break
+
     return violations
 
 
@@ -118,10 +132,10 @@ def _dedupe_strings(values: list[Any]) -> list[str]:
     deduped: list[str] = []
     seen: set[str] = set()
     for value in values:
-        text = sanitize_single_line(str(value or ""))
+        text = " ".join(sanitize_single_line(str(value or "")).split())
         if _is_placeholder(text):
             continue
-        key = text.upper()
+        key = text if _URL_RE.fullmatch(text) else text.upper()
         if key not in seen:
             deduped.append(text)
             seen.add(key)
@@ -134,16 +148,18 @@ def _value_missing(haystack: str, needle: str) -> bool:
         return False
 
     wanted_upper = wanted.upper()
-    if wanted_upper.startswith("CVE-"):
-        return wanted_upper not in {cve.upper() for cve in extract_cves(haystack)}
-
-    if _URL_RE.fullmatch(wanted):
-        return wanted.casefold() not in {
-            url.casefold() for url in _extract_urls(haystack)
+    if _IDENTIFIER_RE.fullmatch(wanted):
+        return wanted_upper not in {
+            match.group().upper() for match in _IDENTIFIER_RE.finditer(haystack)
         }
 
+    if _URL_RE.fullmatch(wanted):
+        return wanted not in _extract_urls(haystack)
+
     existing_tokens = {
-        token.casefold() for token in re.split(r"[\n,;]+", haystack) if token.strip()
+        " ".join(token.split()).casefold()
+        for token in re.split(r"[\n,;]+", haystack)
+        if token.strip()
     }
     return wanted.casefold() not in existing_tokens
 
