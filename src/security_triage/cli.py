@@ -52,7 +52,7 @@ from .rules import (
     validate_discovery_document,
     validate_repo_name,
 )
-from .sbom import fetch_flatcar_production_sbom, load_sbom_fixture
+from .sbom import SBOMIndex, fetch_flatcar_production_sbom, load_sbom_fixture
 from .sources import fetch_live_sources, load_source_fixture
 from .time_utils import default_processing_window, iso_now
 
@@ -462,7 +462,7 @@ def run_discovery_command(args: argparse.Namespace) -> int:
         progress,
         target_repo=advisory_repo,
         feedback=feedback,
-        scope_evidence=_load_discovery_scope_evidence(args),
+        scope_sboms=_load_discovery_scope_sboms(args),
     )
     document = workflow.run(entries, window_start, window_end)
     document["errors"].extend(source_errors)
@@ -479,8 +479,10 @@ def run_discovery_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def _load_discovery_scope_evidence(args: argparse.Namespace) -> list[dict[str, Any]]:
-    evidence: list[dict[str, Any]] = []
+def _load_discovery_scope_sboms(
+    args: argparse.Namespace,
+) -> list[tuple[str, SBOMIndex]]:
+    scope_sboms: list[tuple[str, SBOMIndex]] = []
     snapshots = [("sdk_only", path) for path in [args.sdk_sbom_fixture] if path] + [
         ("sysext", path) for path in args.sysext_sbom_fixture
     ]
@@ -488,17 +490,9 @@ def _load_discovery_scope_evidence(args: argparse.Namespace) -> list[dict[str, A
         index = load_sbom_fixture(path)
         if not str(index.metadata.get("spdxVersion") or "").startswith("SPDX-"):
             raise ValueError(f"Scope snapshot {path} must declare its SPDX version")
-        seen: set[str] = set()
-        for package in index.packages:
-            identities = package.purls or [package.name]
-            for identity in identities:
-                for proof in index.discovery_scope_evidence(identity, scope):
-                    if proof["package"] not in seen:
-                        seen.add(proof["package"])
-                        evidence.append(
-                            {**proof, "snapshot_source": Path(path).resolve().as_uri()}
-                        )
-    return evidence
+        index.metadata["source_url"] = Path(path).resolve().as_uri()
+        scope_sboms.append((scope, index))
+    return scope_sboms
 
 
 def run_cleanup_command(args: argparse.Namespace) -> int:

@@ -200,6 +200,7 @@ class SBOMIndex:
                 "purls": match.get("purls", []),
                 "match_type": match["match_type"],
                 "snapshot_sha256": self.metadata["snapshot_sha256"],
+                "snapshot_source": self.metadata.get("source_url"),
                 "snapshot_metadata": {
                     key: self.metadata.get(key)
                     for key in (

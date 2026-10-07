@@ -196,6 +196,50 @@ def test_65_ghsa_and_reference_whitespace_is_idempotent_and_human_text_guarded()
     )
 
 
+def test_approved_update_rebases_on_body_edited_after_review():
+    client = FakeGitHubIssueClient()
+    old_body = (
+        "Name: widget\nCVEs: CVE-2026-0001\nCVSSs: n/a\n"
+        "Action Needed: TBD\nSummary: original context\n\nrefmap.gentoo: TBD"
+    )
+    client.seed_issue(65, "update: widget", old_body, ["advisory", "security"])
+    record = _discovery_record(
+        decision={"action": "update_existing_issue", "confidence": "high"},
+        existing_issue_matches=[
+            {"issue": 65, "package": "widget", "state": "open", "body": old_body}
+        ],
+        proposed_issue=None,
+        proposed_update={
+            "issue": 65,
+            "matched_existing_issue": {"body": old_body},
+            "comment_body": "Upstream security evidence changed.",
+        },
+    )
+    batch = review.build_review_batch(_context(), _discovery_document([record]))
+    [number] = _approve(client, batch, {review.DISCOVERY_KIND_UPDATE})
+    current_body = old_body.replace(
+        "CVE-2026-0001", "CVE-2026-0001, CVE-2026-0002"
+    ).replace("Action Needed: TBD", "Action Needed: update to >= 9.9.9")
+    current_body += "\nHuman rollout notes: https://example.org/human-plan"
+    client.set_body(65, current_body)
+
+    result = review.apply_review_issue(
+        client,
+        client,
+        GitHubActionRunner(client, _default_flags()),
+        number,
+        _apply_ctx(),
+    )
+    assert result["groups"][0]["outcome"] == "applied"
+    updated_body = client.get_issue(65).body
+    assert not removal_guard_violations(current_body, updated_body)
+    assert "CVE-2026-9001" in updated_body
+    assert "CVE-2026-0002" in updated_body
+    assert "Action Needed: update to >= 9.9.9" in updated_body
+    assert "Human rollout notes: https://example.org/human-plan" in updated_body
+    assert len(client.list_comments(65)) == 1
+
+
 def test_146_summary_snapshots_selection_kind_package_url_and_distinct_operations():
     record = _discovery_record(
         decision={"action": "update_existing_issue", "confidence": "high"},

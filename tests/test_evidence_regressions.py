@@ -812,7 +812,7 @@ def test_scope_snapshot_evidence_runs_end_to_end_through_discovery(
         HeuristicModelClient(),
         SBOMIndex([]),
         [],
-        scope_evidence=index(package).discovery_scope_evidence(package, scope),
+        scope_sboms=[(scope, index(package))],
     )
     record = workflow.run(
         [entry(package)],
@@ -869,9 +869,9 @@ def test_sdk_sysext_labels_follow_snapshot_production_precedence(production_pres
         HeuristicModelClient(),
         production,
         [],
-        scope_evidence=[
-            *index("python").discovery_scope_evidence("python", "sdk_only"),
-            *index("python").discovery_scope_evidence("python", "sysext"),
+        scope_sboms=[
+            ("sdk_only", index("python")),
+            ("sysext", index("python")),
         ],
     )
     record = workflow.run(
@@ -890,9 +890,9 @@ def test_repeated_sysext_snapshots_are_searched_independently():
         HeuristicModelClient(),
         SBOMIndex([]),
         [],
-        scope_evidence=[
-            *index("podman").discovery_scope_evidence("podman", "sysext"),
-            *index("zfs").discovery_scope_evidence("zfs", "sysext"),
+        scope_sboms=[
+            ("sysext", index("podman")),
+            ("sysext", index("zfs")),
         ],
     )
     record = workflow.run(

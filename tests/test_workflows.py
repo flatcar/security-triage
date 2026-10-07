@@ -69,9 +69,7 @@ def test_discovery_passes_validated_sbom_scope_and_snapshot_to_reasoning():
 
     document = DiscoveryWorkflow(
         ObservedModel(), sbom, [], scope_sboms=[("sysext", sysext)]
-    ).run(
-        [_cares_entry()], "", ""
-    )
+    ).run([_cares_entry()], "", "")
     record = document["records"][0]
     assert record["scope_evidence"] == scope
     assert record["flatcar_relevance"]["scope"] == "production"
@@ -84,7 +82,9 @@ def test_discovery_production_precedence_does_not_claim_sdk_only():
     sdk = SBOMIndex([SBOMPackage("c-ares", "1.34.5", "SPDXRef-sdk-cares")])
     sysext = SBOMIndex([SBOMPackage("c-ares", "1.34.5", "SPDXRef-sysext-cares")])
     record = DiscoveryWorkflow(
-        HeuristicModelClient(), production, [],
+        HeuristicModelClient(),
+        production,
+        [],
         scope_sboms=[("sdk_only", sdk), ("sysext", sysext)],
     ).run([_cares_entry()], "", "")["records"][0]
     assert record["flatcar_relevance"]["scope"] == "production"

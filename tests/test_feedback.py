@@ -2,9 +2,11 @@ import base64
 import copy
 import json
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
+from security_triage import issues as issues_module
 from security_triage.actions import ActionFlags, GitHubActionRunner
 from security_triage.discovery import DiscoveryWorkflow
 from security_triage.feedback import (
@@ -19,6 +21,7 @@ from security_triage.feedback import (
     render_feedback_summary,
     validate_feedback_payload,
 )
+from security_triage.issues import GitHubIssueClient
 from security_triage.models import HeuristicModelClient
 from security_triage.records import Issue, SBOMPackage, SourceEntry
 from security_triage.review import (
@@ -61,7 +64,9 @@ def finding():
     }
 
 
-def approved(record=None, decision="deferred", *, comment_id=11, checked=True):
+def approved(
+    record=None, decision="deferred", *, comment_id=11, checked=True, issue_number=10
+):
     payload = build_feedback_payload(
         record or finding(), decision, advisory_repository=REPO
     )
@@ -95,11 +100,11 @@ def approved(record=None, decision="deferred", *, comment_id=11, checked=True):
     if checked:
         checkbox = checkbox.replace("[ ]", "[x]")
     issue = Issue(
-        number=10,
+        number=issue_number,
         title="Security review",
         body=checkbox + "\n" + embed_manifest(manifest),
         labels=["security-triage/review"],
-        html_url=f"https://github.com/{REPO}/issues/10",
+        html_url=f"https://github.com/{REPO}/issues/{issue_number}",
         state="closed",
         state_reason="completed",
         raw={"user": BOT.copy()},
@@ -394,6 +399,94 @@ def test_feedback_loader_uses_bounded_page_helpers():
         ("comments", 1, 100),
         ("comments", 2, 100),
     ]
+
+
+@pytest.mark.parametrize("limit", [100, 200])
+def test_feedback_pagination_counts_pr_rows_and_finds_later_revocation(
+    monkeypatch, limit
+):
+    negative, negative_comment = approved()
+    revoked, revoked_comment = approved(
+        decision="revoke", comment_id=12, issue_number=12
+    )
+    pages = []
+
+    def api_issue(issue):
+        return {
+            **{
+                key: getattr(issue, key)
+                for key in (
+                    "number",
+                    "title",
+                    "body",
+                    "labels",
+                    "html_url",
+                    "state",
+                    "state_reason",
+                )
+            },
+            "user": BOT.copy(),
+        }
+
+    def fetch(url, **kwargs):
+        parsed = urlsplit(url)
+        if parsed.path.endswith("/issues/10/comments"):
+            return [negative_comment]
+        if parsed.path.endswith("/issues/12/comments"):
+            return [revoked_comment]
+        page = int(parse_qs(parsed.query)["page"][0])
+        pages.append(page)
+        if page == 1:
+            return [
+                api_issue(negative),
+                *[
+                    {"number": number, "title": "No confirmed feedback"}
+                    for number in range(100, 198)
+                ],
+                {"number": 300, "title": "A pull request", "pull_request": {}},
+            ]
+        assert page == 2
+        return [api_issue(revoked)]
+
+    monkeypatch.setattr(issues_module, "fetch_json", fetch)
+    feedback = load_review_feedback(GitHubIssueClient(REPO), max_review_issues=limit)
+    record = finding()
+    annotate_review_feedback(record, feedback, advisory_repository=REPO)
+    if limit == 100:
+        assert pages == [1]
+        assert feedback == []
+        assert feedback.coverage["complete"] is False
+        assert feedback.coverage["review_rows_scanned"] == 100
+        assert feedback.coverage["review_issues_scanned"] == 99
+        assert "review_suppression" not in record
+    else:
+        assert pages == [1, 2]
+        assert len(feedback) == 2
+        assert feedback.coverage["complete"] is True
+        assert feedback.coverage["review_rows_scanned"] == 101
+        assert feedback.coverage["review_issues_scanned"] == 100
+        assert record["review_suppression"]["decision"] == "revoke"
+        assert record["review_suppression"]["suppressed"] is False
+
+
+def test_feedback_pagination_is_bounded_even_for_pr_only_pages(monkeypatch):
+    pages = []
+
+    def fetch(url, **kwargs):
+        page = int(parse_qs(urlsplit(url).query)["page"][0])
+        pages.append(page)
+        assert page <= 2
+        return [
+            {"number": page * 100 + number, "pull_request": {}} for number in range(100)
+        ]
+
+    monkeypatch.setattr(issues_module, "fetch_json", fetch)
+    feedback = load_review_feedback(GitHubIssueClient(REPO), max_review_issues=200)
+    assert pages == [1, 2]
+    assert feedback == []
+    assert feedback.coverage["complete"] is False
+    assert feedback.coverage["review_rows_scanned"] == 200
+    assert feedback.coverage["review_issues_scanned"] == 0
 
 
 def test_feedback_index_avoids_hundreds_of_unconfirmed_review_issues():

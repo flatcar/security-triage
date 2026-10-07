@@ -293,7 +293,7 @@ Cleanup remains a separate, explicitly invoked workflow; it is not added to sche
 
 Discovery retains ecosystem/namespace identity rather than treating a crate, a Go module, and a similarly named system package as interchangeable. Substring matches are candidates, not shipping evidence. Missing production entries do not establish absence from SDKs or extensions.
 
-For those scopes, maintainers can supply current, authoritative SPDX snapshots with discovery's `--sdk-sbom-fixture` and repeatable `--sysext-sbom-fixture`. Supplying these flags declares the snapshot's scope; use actual Flatcar artifacts, not guessed inventories. Package/version evidence and snapshot digests are recorded. These inputs are not accepted by cleanup, and are not downloaded or refreshed automatically.
+For those scopes, maintainers can supply current, authoritative SPDX snapshots with discovery's `--sdk-sbom-fixture` and repeatable `--sysext-sbom-fixture`. Supplying these flags declares the snapshot's scope; use actual Flatcar artifacts, not guessed inventories. Each snapshot is matched against the finding's package identity; ambiguous matches do not establish scope. Package/version evidence, snapshot paths, and digests are recorded. These inputs are not accepted by cleanup, and are not downloaded or refreshed automatically.
 
 Unknown scope, affectedness, or source claims remain explicit review questions. Concrete update targets require source fixed-version evidence; placeholder text such as “update target” is not a remediation requirement. These deterministic checks constrain model confidence rather than treating model agreement as proof.
 

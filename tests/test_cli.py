@@ -99,7 +99,11 @@ def test_discovery_scope_snapshots_have_provenance_and_are_not_cleanup_inputs():
             str(FIXTURES / "sbom.json"),
         ]
     )
-    evidence = cli._load_discovery_scope_evidence(args)
+    evidence = [
+        item
+        for scope, index in cli._load_discovery_scope_sboms(args)
+        for item in index.discovery_scope_evidence("openssl", scope)
+    ]
     assert {entry["scope"] for entry in evidence} == {"sdk_only", "sysext"}
     assert all(entry["validated"] is True for entry in evidence)
     assert all(entry["snapshot_source"].startswith("file:") for entry in evidence)
@@ -114,7 +118,7 @@ def test_discovery_scope_snapshot_rejects_missing_spdx_metadata(tmp_path):
     path.write_text('{"packages": [{"name": "bubblewrap", "versionInfo": "1.0"}]}')
     args = cli.build_parser().parse_args(["discovery", "--sdk-sbom-fixture", str(path)])
     with pytest.raises(ValueError, match="SPDX version"):
-        cli._load_discovery_scope_evidence(args)
+        cli._load_discovery_scope_sboms(args)
 
 
 def test_ambiguous_scope_snapshot_does_not_supply_trusted_proof(tmp_path):
@@ -131,7 +135,8 @@ def test_ambiguous_scope_snapshot_does_not_supply_trusted_proof(tmp_path):
         )
     )
     args = cli.build_parser().parse_args(["discovery", "--sdk-sbom-fixture", str(path)])
-    assert cli._load_discovery_scope_evidence(args) == []
+    [(scope, index)] = cli._load_discovery_scope_sboms(args)
+    assert index.discovery_scope_evidence("bubblewrap", scope) == []
 
 
 def test_cli_fixed_production_does_not_hide_affected_sdk(tmp_path):
@@ -177,6 +182,96 @@ def test_cli_fixed_production_does_not_hide_affected_sdk(tmp_path):
     )
     assert record["scope_evidence"][0]["versionInfo"] == "3.2.3"
     assert record["decision"]["action"] in {"needs_manual_review", "create_issue"}
+
+
+@pytest.mark.parametrize(
+    "flag,scope",
+    [("--sdk-sbom-fixture", "sdk_only"), ("--sysext-sbom-fixture", "sysext")],
+)
+@pytest.mark.parametrize(
+    "purls,matched",
+    [
+        (["pkg:cargo/tar", "pkg:gentoo/app-arch/tar"], True),
+        (["pkg:gentoo/app-arch/tar", "pkg:gentoo/dev-libs/tar"], False),
+        (["pkg:cargo/tar"], False),
+    ],
+)
+def test_cli_scope_snapshots_match_each_finding_identity(
+    tmp_path, flag, scope, purls, matched
+):
+    source = tmp_path / "source.json"
+    source.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "source": "gentoo",
+                        "source_url": "https://bugs.gentoo.org/12345",
+                        "entry_id": "12345",
+                        "title": "tar: security advisory",
+                        "content": "Package: tar\nCVE: CVE-2026-12345\nFixed in 1.2.3",
+                    }
+                ]
+            }
+        )
+    )
+    production = tmp_path / "production.json"
+    production.write_text('{"spdxVersion": "SPDX-2.3", "packages": []}')
+    issues = tmp_path / "issues.json"
+    issues.write_text("[]")
+    snapshot = tmp_path / "scope.json"
+    snapshot.write_text(
+        json.dumps(
+            {
+                "spdxVersion": "SPDX-2.3",
+                "packages": [
+                    {
+                        "name": "tar",
+                        "versionInfo": "1.2.2",
+                        "SPDXID": f"SPDXRef-tar-{number}",
+                        "externalRefs": [
+                            {"referenceType": "purl", "referenceLocator": purl}
+                        ],
+                    }
+                    for number, purl in enumerate(purls)
+                ],
+            }
+        )
+    )
+    output = tmp_path / "discovery.json"
+    assert (
+        main(
+            [
+                "discovery",
+                "--quiet",
+                "--source-fixture",
+                str(source),
+                "--issues-fixture",
+                str(issues),
+                "--sbom-fixture",
+                str(production),
+                flag,
+                str(snapshot),
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    record = json.loads(output.read_text())["records"][0]
+    assert record["sbom_package_matches"] == []
+    if matched:
+        [proof] = record["scope_evidence"]
+        assert proof["package"] == "tar"
+        assert proof["scope"] == scope
+        assert proof["purls"] == ["pkg:gentoo/app-arch/tar"]
+        assert proof["snapshot_source"] == snapshot.resolve().as_uri()
+        assert len(proof["snapshot_sha256"]) == 64
+        assert proof["discovery_only"] is True
+        assert record["decision"]["action"] == "create_issue"
+    else:
+        assert record["scope_evidence"] == []
+        assert record["decision"]["action"] == "needs_manual_review"
 
 
 def test_discovery_accepts_source_cache_flags():

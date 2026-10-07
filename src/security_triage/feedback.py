@@ -74,6 +74,7 @@ class FeedbackLoadResult(list[dict[str, Any]]):
         self.coverage: dict[str, Any] = {
             "complete": True,
             "review_issues_scanned": 0,
+            "review_rows_scanned": 0,
             "comments_scanned": 0,
             "warnings": [],
         }
@@ -476,7 +477,7 @@ def load_review_feedback(
     max_comments_per_issue: int = DEFAULT_MAX_COMMENTS_PER_ISSUE,
     max_total_comments: int = DEFAULT_MAX_TOTAL_COMMENTS,
 ) -> FeedbackLoadResult:
-    """Read bounded review history; incomplete coverage never suppresses findings."""
+    """Read bounded history; raw issue/PR rows count toward the review scan limit."""
     from .issues import GitHubIssueClient
 
     review_repo = validate_repo_name(client.repo)
@@ -520,19 +521,24 @@ def load_review_feedback(
                 if callable(page_reader)
                 else client.list_issues_by_label(FEEDBACK_LABEL, state="all")
             )
-            remaining = max_review_issues - len(issues)
+            # GitHub's Issues List also returns pull requests, which the client
+            # filters out. Only the raw row count can establish page fullness,
+            # and counting those rows also bounds scans of PR-only pages.
+            raw_count = getattr(items, "raw_count", len(items))
+            remaining = max_review_issues - records.coverage["review_rows_scanned"]
             issues.extend(items[:remaining])
             records.coverage["review_issues_scanned"] = len(issues)
-            if len(items) > remaining or (
+            records.coverage["review_rows_scanned"] += min(raw_count, remaining)
+            if raw_count > remaining or (
                 callable(page_reader)
-                and len(items) == 100
-                and len(issues) >= max_review_issues
+                and raw_count == 100
+                and records.coverage["review_rows_scanned"] >= max_review_issues
             ):
                 records.incomplete(
                     "Review issue scan limit reached; feedback suppression is disabled."
                 )
                 return records
-            if not callable(page_reader) or len(items) < 100:
+            if not callable(page_reader) or raw_count < 100:
                 break
             page += 1
     except Exception as exc:
