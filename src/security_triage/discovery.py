@@ -83,6 +83,7 @@ class DiscoveryWorkflow:
                     {"record_id": record_id, "source": entry.source, "error": str(exc)}
                 )
                 record = self._manual_record(record_id, entry, str(exc))
+            record["sbom_provenance"] = self.sbom_index.metadata.get("provenance", {})
             records.append(record)
             decision = record.get("decision", {})
             package_name = (
@@ -107,6 +108,7 @@ class DiscoveryWorkflow:
             },
             "sources": _sources_summary(entries),
             "model": self.model_client.metadata(),
+            "sbom_metadata": self.sbom_index.metadata,
             "records": records,
             "errors": errors,
         }
@@ -145,7 +147,12 @@ class DiscoveryWorkflow:
                 upstream_activity,
             )
         evidence_bundle = build_discovery_evidence_bundle(
-            record_id, entry, extraction, sbom_matches, existing_issue_matches
+            record_id,
+            entry,
+            extraction,
+            sbom_matches,
+            existing_issue_matches,
+            self.sbom_index.metadata,
         )
         self.debug_logger.log(
             "discovery_evidence_bundle", record_id=record_id, bundle=evidence_bundle
