@@ -21,9 +21,17 @@ from test_review import (  # type: ignore[import-not-found]
 
 from security_triage import review
 from security_triage.actions import GitHubActionRunner
-from security_triage.feedback import FEEDBACK_KIND, load_review_feedback
+from security_triage.discovery import DiscoveryWorkflow
+from security_triage.feedback import (
+    FEEDBACK_KIND,
+    annotate_review_feedback,
+    load_review_feedback,
+)
 from security_triage.issue_updates import append_field_values, removal_guard_violations
 from security_triage.issues import find_existing_issue_matches
+from security_triage.models import HeuristicModelClient
+from security_triage.records import SBOMPackage, SourceEntry
+from security_triage.sbom import SBOMIndex
 
 
 def _approve(client, batch, kinds=None):
@@ -523,6 +531,158 @@ def test_revoked_or_uncertain_feedback_is_not_suppression():
         assert batch.groups[0].candidates[0].kind == review.DISCOVERY_KIND_CREATE
 
 
+def test_track_uncertain_keeps_original_ignore_visible_without_authorizing_mutation():
+    record = _discovery_record(
+        decision={"action": "ignore", "confidence": "high"},
+        review_suppression={"suppressed": False, "decision": "track_uncertain"},
+    )
+    batch = review.build_review_batch(
+        _context(review_detail="compact"), _discovery_document([record])
+    )
+    assert len(batch.groups) == 1
+    assert not batch.omissions
+    assert batch.groups[0].candidates[0].kind == review.DISCOVERY_KIND_IGNORE
+
+
+def test_cargo_identity_survives_create_rediscovery_and_guarded_update():
+    client = FakeGitHubIssueClient()
+    sbom = SBOMIndex(
+        [SBOMPackage("tar", "1.2.2", "SPDXRef-crate", purls=["pkg:cargo/tar"])]
+    )
+
+    class QualifiedModel(HeuristicModelClient):
+        def extract_advisory(self, entry):
+            result = super().extract_advisory(entry)
+            result["package_purl"] = "pkg:cargo/tar"
+            return result
+
+    def discover(cve):
+        source = SourceEntry(
+            source="rustsec",
+            source_url="https://rustsec.org/advisories/RUSTSEC-2026-0001.html",
+            entry_id=cve,
+            title="tar: security advisory",
+            content=f"Package: tar\nPackage URL: pkg:cargo/tar\nCVE: {cve}\nFixed in 1.2.3",
+        )
+        return DiscoveryWorkflow(
+            QualifiedModel(), sbom, client.list_issues(), target_repo=REPO
+        ).run([source], "", "")
+
+    first = discover("CVE-2026-12345")
+    assert first["records"][0]["decision"]["action"] == "create_issue"
+    batch = review.build_review_batch(_context("cargo-create"), first)
+    [number] = _approve(client, batch, {review.DISCOVERY_KIND_CREATE})
+    result = review.apply_review_issue(
+        client,
+        client,
+        GitHubActionRunner(client, _default_flags()),
+        number,
+        _apply_ctx(),
+    )
+    assert result["outcome"] == "applied"
+    [advisory] = client.fetch_open_update_issues()
+    assert advisory.title == "update: tar"
+    assert advisory.body.startswith("Name: tar\nCVEs:")
+    assert "Note: Canonical package identity: `pkg:cargo/tar`." in advisory.body
+    parsed = review.parse_issue_body(advisory.body)
+    assert parsed.name == "tar" and parsed.identity == "pkg:cargo/tar"
+    assert not find_existing_issue_matches({"package_name": "tar"}, [advisory])
+    assert not review._identity_matches(parsed, "tar", parsed.cves)
+    collision = review._execute_discovery_update(
+        "native-tar",
+        {
+            "issue": advisory.number,
+            "expected_package": "tar",
+            "field_additions": {"cves": ["CVE-2026-99999"]},
+        },
+        client,
+        GitHubActionRunner(client, _default_flags()),
+    )
+    assert collision["outcome"] == "skipped"
+    assert client.get_issue(advisory.number).body == advisory.body
+    assert discover("CVE-2026-12345")["records"][0]["decision"]["action"] == "ignore"
+
+    following = discover("CVE-2026-22222")
+    assert following["records"][0]["decision"]["action"] == "update_existing_issue"
+    batch = review.build_review_batch(_context("cargo-update"), following)
+    [number] = _approve(client, batch, {review.DISCOVERY_KIND_UPDATE})
+    result = review.apply_review_issue(
+        client,
+        client,
+        GitHubActionRunner(client, _default_flags()),
+        number,
+        _apply_ctx(),
+    )
+    assert result["groups"][0]["outcome"] == "applied"
+    body = client.get_issue(advisory.number).body
+    assert "CVE-2026-12345" in body and "CVE-2026-22222" in body
+    assert body.count("Canonical package identity") == 1
+    assert len(client.fetch_open_update_issues()) == 1
+
+
+@pytest.mark.parametrize(
+    "original",
+    [
+        "",
+        "Human rollout plan: https://example.org/plan",
+        "Human rollout plan\nCVEs: CVE-2026-0001",
+        "Name: widget\nSummary: Keep this human summary.\n\nrefmap.gentoo: TBD",
+    ],
+)
+def test_title_only_update_adds_approved_fields_without_losing_prose(original):
+    client = FakeGitHubIssueClient()
+    client.seed_issue(65, "update: widget", original, [])
+    source = SourceEntry(
+        source="gentoo",
+        source_url="https://bugs.gentoo.org/1",
+        entry_id="1",
+        title="widget: security advisory",
+        content="Package: widget\nCVE: CVE-2026-9001\nFixed in 1.2.3",
+    )
+    document = DiscoveryWorkflow(
+        HeuristicModelClient(),
+        SBOMIndex([SBOMPackage("widget", "1.2.2", "SPDXRef-widget")]),
+        [client.get_issue(65)],
+        target_repo=REPO,
+    ).run([source], "", "")
+    [record] = document["records"]
+    assert record["decision"]["action"] == "update_existing_issue"
+    preview = record["proposed_update"]["updated_body"]
+    batch = review.build_review_batch(_context(), document)
+    [number] = _approve(client, batch, {review.DISCOVERY_KIND_UPDATE})
+    result = review.apply_review_issue(
+        client,
+        client,
+        GitHubActionRunner(client, _default_flags()),
+        number,
+        _apply_ctx(),
+    )
+    assert result["groups"][0]["outcome"] == "applied"
+    updated = client.get_issue(65).body
+    assert updated == preview
+    assert not removal_guard_violations(original, updated)
+    assert all(
+        line in updated
+        for line in original.splitlines()
+        if line and not line.endswith(": TBD")
+    )
+    assert review.parse_issue_body(updated).valid
+    assert "\n\nrefmap.gentoo:" in updated
+    assert "CVE-2026-9001" in updated
+    assert "Action Needed: update to >= 1.2.3" in updated
+    action = _action_ids_by_kind(batch.parts[0].manifest)[review.DISCOVERY_KIND_UPDATE][
+        0
+    ]
+    retried = review._execute_discovery_update(
+        action["action_id"],
+        action["payload"],
+        client,
+        GitHubActionRunner(client, _default_flags()),
+    )
+    assert retried["outcome"] == "no_op"
+    assert client.get_issue(65).body == updated
+
+
 def test_namespace_suffix_does_not_authorize_unrelated_issue_match():
     client = FakeGitHubIssueClient()
     client.seed_issue(75, "update: openssl", "Name: openssl\nCVEs: CVE-2026-9001", [])
@@ -768,7 +928,10 @@ def test_retry_without_feedback_checks_preserves_and_indexes_prior_confirmation(
     )
 
 
-def test_changed_feedback_selection_on_partial_retry_preserves_both_receipts():
+@pytest.mark.parametrize("keep_previous", [False, True])
+def test_changed_feedback_selection_on_partial_retry_preserves_both_receipts(
+    keep_previous,
+):
     records = [
         _discovery_record(record_id="first"),
         _discovery_record(
@@ -812,7 +975,10 @@ def test_changed_feedback_selection_on_partial_retry_preserves_both_receipts():
     )
     assert result["outcome"] == "partial_failure"
     original_receipt = client._comments[number][0]["body"]
-    client.set_body(number, _check_action(batch.parts[0].body, second["action_id"]))
+    body = _check_action(batch.parts[0].body, second["action_id"])
+    if keep_previous:
+        body = _check_action(body, first["action_id"])
+    client.set_body(number, body)
     client.add_labels = add_labels
     result = review.apply_review_issue(
         client,
@@ -828,6 +994,74 @@ def test_changed_feedback_selection_on_partial_retry_preserves_both_receipts():
         item["decision"]
         for item in load_review_feedback(client, advisory_repository=REPO)
     } == {"wrong_package", "deferred"}
+
+
+def test_unrelated_retry_selection_cannot_refresh_feedback_past_revocation():
+    client = FakeGitHubIssueClient()
+    record = _discovery_record(record_id="first")
+    other = _discovery_record(
+        record_id="other", source_url="https://bugs.gentoo.org/2", raw_advisory_id="2"
+    )
+    batch = review.build_review_batch(
+        _context(enable_feedback=True), _discovery_document([record, other])
+    )
+    [created] = review.create_review_batch(client, batch)
+    first_action = next(
+        action
+        for action in _action_ids_by_kind(batch.parts[0].manifest)[FEEDBACK_KIND]
+        if action["payload"]["decision"] == "wrong_package"
+        and action["payload"]["evidence_snapshot"]["source_url"].endswith("/1")
+    )
+    other_action = _action_ids_by_kind(batch.parts[0].manifest)[
+        review.DISCOVERY_KIND_CREATE
+    ][1]
+    first_body = _check_action(batch.parts[0].body, first_action["action_id"])
+    client.set_body(
+        created.issue_number, _check_action(first_body, other_action["action_id"])
+    )
+    client.close_as(created.issue_number, "completed")
+    advisory_client = FakeGitHubIssueClient()
+
+    def fail_create(*args):
+        raise OSError("temporary issue creation failure")
+
+    advisory_client.create_issue = fail_create
+    result = review.apply_review_issue(
+        client,
+        advisory_client,
+        GitHubActionRunner(advisory_client, _default_flags()),
+        created.issue_number,
+        _apply_ctx(),
+    )
+    assert result["outcome"] == "partial_failure"
+    original = load_review_feedback(client, advisory_repository=REPO)[0]
+    revocation = review.build_review_batch(
+        _context("revocation", enable_feedback=True), _discovery_document([record])
+    )
+    number = _select_feedback(client, revocation, {"revoke"})
+    review.apply_review_issue(
+        client,
+        client,
+        GitHubActionRunner(client, _default_flags()),
+        number,
+        _apply_ctx(),
+    )
+    client.set_body(created.issue_number, first_body)
+    result = review.apply_review_issue(
+        client,
+        advisory_client,
+        GitHubActionRunner(advisory_client, _default_flags()),
+        created.issue_number,
+        _apply_ctx(),
+    )
+    assert result["outcome"] == "applied"
+    feedback = load_review_feedback(client, advisory_repository=REPO)
+    assert [item for item in feedback if item["decision"] == "wrong_package"] == [
+        original
+    ]
+    annotate_review_feedback(record, feedback, advisory_repository=REPO)
+    assert record["review_suppression"]["decision"] == "revoke"
+    assert record["review_suppression"]["suppressed"] is False
 
 
 def test_failed_receipt_write_does_not_index_or_mark_feedback_applied():
@@ -871,6 +1105,51 @@ def test_create_labels_ignore_unsupported_model_secondary_scope(proposed):
     payload = review._create_payload(record)
     assert "advisory/only-sdk" not in payload["labels"]
     assert "advisory/sysext" not in payload["labels"]
+
+
+@pytest.mark.parametrize("with_sysext", [False, True])
+@pytest.mark.parametrize("proposed", [False, True])
+def test_review_apply_preserves_production_precedence_over_sdk_label(
+    with_sysext, proposed
+):
+    inventory = SBOMIndex([SBOMPackage("widget", "1.2.2", "SPDXRef-widget")])
+    scopes = [("sdk_only", inventory)]
+    if with_sysext:
+        scopes.append(("sysext", inventory))
+    source = SourceEntry(
+        source="gentoo",
+        source_url="https://bugs.gentoo.org/1",
+        entry_id="1",
+        title="widget: security advisory",
+        content="Package: widget\nCVE: CVE-2026-9001\nFixed in 1.2.3",
+    )
+    document = DiscoveryWorkflow(
+        HeuristicModelClient(), inventory, [], target_repo=REPO, scope_sboms=scopes
+    ).run([source], "", "")
+    [record] = document["records"]
+    assert record["flatcar_relevance"]["scope"] == "production"
+    assert "advisory/only-sdk" not in record["proposed_issue"]["labels"]
+    if not proposed:
+        record["proposed_issue"] = None
+    batch = review.build_review_batch(_context(review_detail="full"), document)
+    [action] = _action_ids_by_kind(batch.parts[0].manifest)[
+        review.DISCOVERY_KIND_CREATE
+    ]
+    assert "advisory/only-sdk" not in action["payload"]["labels"]
+    assert ("advisory/sysext" in action["payload"]["labels"]) is with_sysext
+    client = FakeGitHubIssueClient()
+    [number] = _approve(client, batch, {review.DISCOVERY_KIND_CREATE})
+    result = review.apply_review_issue(
+        client,
+        client,
+        GitHubActionRunner(client, _default_flags()),
+        number,
+        _apply_ctx(),
+    )
+    assert result["outcome"] == "applied"
+    [advisory] = client.fetch_open_update_issues()
+    assert "advisory/only-sdk" not in advisory.labels
+    assert ("advisory/sysext" in advisory.labels) is with_sysext
 
 
 def test_create_secondary_scope_requires_validated_same_identity_source_evidence():

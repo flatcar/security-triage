@@ -293,6 +293,8 @@ Cleanup remains a separate, explicitly invoked workflow; it is not added to sche
 
 Discovery retains ecosystem/namespace identity rather than treating a crate, a Go module, and a similarly named system package as interchangeable. Substring matches are candidates, not shipping evidence. Missing production entries do not establish absence from SDKs or extensions.
 
+Generated issues retain qualified identities in a bounded `Note: Canonical package identity: ...` within `Summary`, preserving the official field order and `update: <package>` title. Conflicting identity notes or ambiguous foreign-ecosystem context in legacy bare-name issues require manual clarification. Approved updates can add missing official fields to title-only/prose issues without removing human text.
+
 For those scopes, maintainers can supply current, authoritative SPDX snapshots with discovery's `--sdk-sbom-fixture` and repeatable `--sysext-sbom-fixture`. Supplying these flags declares the snapshot's scope; use actual Flatcar artifacts, not guessed inventories. Each snapshot is matched against the finding's package identity; ambiguous matches do not establish scope. Package/version evidence, snapshot paths, and digests are recorded. These inputs are not accepted by cleanup, and are not downloaded or refreshed automatically.
 
 Unknown scope, affectedness, or source claims remain explicit review questions. Concrete update targets require source fixed-version evidence; placeholder text such as “update target” is not a remediation requirement. These deterministic checks constrain model confidence rather than treating model agreement as proof.
@@ -304,6 +306,8 @@ Unknown scope, affectedness, or source claims remain explicit review questions. 
 Discovery's opt-in `--feedback-review-repo <owner/repo>` reuses confirmed feedback from GitHub Actions bot-authored review execution summaries. The scheduled workflow supplies its own repository. It validates repository, manifest, selected-action and result correlations; ordinary comments, arbitrary bot identities, unchecked boxes, and a closed/applied label alone are not feedback. Local user-authored comments are not automatically trusted. `--feedback-fixture` supports offline replay of issue/comment API envelopes through the same checks.
 
 Wrong-package/not-shipped/already-addressed/deferred decisions suppress only the same finding and meaningful evidence snapshot, not an entire package ecosystem. Changed CVEs, package/version/scope evidence, affected ranges or substantive source facts require fresh review. Known housekeeping/timestamp changes do not. Raw findings and the feedback's provenance remain in the reports. Use a full review with feedback enabled to explicitly revoke a decision; simply reopening an applied review never authorizes new mutations.
+
+`track_uncertain` keeps the finding visible in compact reviews without authorizing an advisory mutation. Retrying unchanged feedback preserves its original receipt rather than overriding a later revocation.
 
 ### 3. Apply on close
 

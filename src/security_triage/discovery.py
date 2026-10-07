@@ -9,8 +9,10 @@ from .debug import DebugLogger
 from .feedback import annotate_review_feedback, meaningful_text
 from .issue_updates import (
     append_field_values,
+    ensure_issue_fields,
     removal_guard_violations,
     set_field_if_placeholder,
+    with_package_identity,
 )
 from .issues import find_existing_issue_matches
 from .models import BaseModelClient
@@ -332,9 +334,8 @@ def _proposed_issue(
     gentoo_ref = extraction.get("gentoo_ref")
     if not is_gentoo_reference(gentoo_ref):
         gentoo_ref = None
-    return {
-        "title": f"update: {package_name}",
-        "body": render_issue_body(
+    body = with_package_identity(
+        render_issue_body(
             package_name,
             extraction.get("cves") or [],
             extraction.get("cvss_scores") or [],
@@ -342,6 +343,11 @@ def _proposed_issue(
             extraction.get("summary"),
             gentoo_ref,
         ),
+        extraction.get("package_identity") or extraction.get("package_name"),
+    )
+    return {
+        "title": f"update: {package_name}",
+        "body": body,
         "labels": labels,
         "assignees": [],
         "milestone": None,
@@ -428,8 +434,9 @@ def _unique_issue_match(
         and package_identities_match(
             package,
             str(
-                (match.get("parsed_issue") or {}).get("name")
+                (match.get("parsed_issue") or {}).get("package_identity")
                 or match.get("package")
+                or (match.get("parsed_issue") or {}).get("name")
                 or ""
             ),
         )
@@ -560,8 +567,14 @@ def _upstream_activity(
     ]
     recommended_additions: list[str] = []
 
-    severity = entry.metadata.get("severity")
-    if severity and str(severity) not in existing_body:
+    severity = str(entry.metadata.get("severity") or "").strip()
+    new_severity = (
+        severity
+        if severity.casefold() not in {"", "normal", "unspecified"}
+        and severity.casefold() not in existing_body.casefold()
+        else None
+    )
+    if new_severity:
         source = entry.metadata.get("url")
         source_text = f" (source: {source})" if source else ""
         recommended_additions.append(f"Review Gentoo severity: {severity}{source_text}")
@@ -613,6 +626,7 @@ def _upstream_activity(
         or new_comments
         or fixed_versions
         or new_scores
+        or new_severity
     )
     return {
         "requires_issue_update": requires_issue_update,
@@ -622,6 +636,7 @@ def _upstream_activity(
         "new_fixed_versions": fixed_versions,
         "new_cvss_scores": new_scores,
         "severity": severity,
+        "new_severity": new_severity,
         "severity_source_url": entry.metadata.get("url"),
         "recommended_additions": recommended_additions,
     }
@@ -682,7 +697,7 @@ def _detected_changes(
                 "reason": "Bugzilla URL, see_also, or source references are missing from the matched issue.",
             }
         )
-    if upstream_activity.get("severity"):
+    if upstream_activity.get("new_severity"):
         changes.append(
             {
                 "kind": "bugzilla_severity",
@@ -738,29 +753,7 @@ def _updated_issue_body(
     )
     if not package_name:
         return None
-    if not existing_body.strip():
-        cves = _dedupe_strings(
-            [
-                *(parsed.get("cves") or []),
-                *(extraction.get("cves") or []),
-                *(upstream_activity.get("new_aliases") or []),
-            ],
-            upper=True,
-        )
-        cvss_scores = _dedupe_strings(
-            [*(parsed.get("cvss_scores") or []), *(extraction.get("cvss_scores") or [])]
-        )
-        updated = render_issue_body(
-            package_name,
-            cves,
-            cvss_scores,
-            extraction.get("action_needed"),
-            extraction.get("summary"),
-            extraction.get("gentoo_ref"),
-        )
-        return updated
-
-    updated = existing_body
+    updated = ensure_issue_fields(existing_body, package_name)
     updated = append_field_values(
         updated,
         "CVEs",

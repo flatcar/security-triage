@@ -43,7 +43,12 @@ from .feedback import (
     render_feedback_summary,
     validate_feedback_payload,
 )
-from .issue_updates import append_field_values, set_field_if_placeholder
+from .issue_updates import (
+    append_field_values,
+    ensure_issue_fields,
+    set_field_if_placeholder,
+    with_package_identity,
+)
 from .issues import (
     GitHubIssueClient,
     find_existing_issue_matches,
@@ -645,6 +650,10 @@ def _validate_manifest_action(action: Any) -> None:
             not parsed.valid
             or not package_identities_match(payload.get("package_name"), parsed.name)
             or not package_identities_match(
+                payload.get("package_identity") or payload.get("package_name"),
+                parsed.identity,
+            )
+            or not package_identities_match(
                 parsed.name, issue_package_from_title(str(payload["title"]))
             )
             or not all(isinstance(label, str) for label in payload["labels"])
@@ -867,6 +876,9 @@ def _omission_reason(
         return "review_suppression:" + (
             decision if decision in FEEDBACK_DECISIONS else "recorded_feedback"
         )
+    feedback = record.get("review_suppression") or {}
+    if isinstance(feedback, dict) and feedback.get("decision") == "track_uncertain":
+        return None
     decision = record.get("decision") or {}
     confidence = (
         decision.get("confidence")
@@ -1042,6 +1054,7 @@ def _create_payload(record: dict[str, Any]) -> dict[str, Any]:
         and entry.get("validated") is True
         and str(entry.get("source") or "").strip()
         and entry.get("scope") in {"sdk_only", "sysext"}
+        and (entry["scope"] != "sdk_only" or relevance.get("scope") != "production")
         and package_identities_match(identity, entry.get("package"))
     ]
     trusted_labels = issue_labels(
@@ -1078,6 +1091,7 @@ def _create_payload(record: dict[str, Any]) -> dict[str, Any]:
             gentoo_ref if is_gentoo_reference(gentoo_ref) else None,
         )
         labels = trusted_labels
+    body = with_package_identity(body, identity)
     return {
         "title": title,
         "body": body,
@@ -1513,12 +1527,12 @@ def _render_candidate_preview(candidate: ActionCandidate) -> str:
             )
         if additions.get("action_needed"):
             add_lines.append(
-                "- Action Needed (only applied if currently TBD): "
+                "- Action Needed (only applied if missing or currently TBD): "
                 f"{_truncate_md(additions['action_needed'], 200)}"
             )
         if additions.get("summary"):
             add_lines.append(
-                "- Summary (only applied if currently TBD): "
+                "- Summary (only applied if missing or currently TBD): "
                 f"{_truncate_md(additions['summary'])}"
             )
         body = (
@@ -1540,7 +1554,8 @@ def _render_candidate_preview(candidate: ActionCandidate) -> str:
             )
         preview += (
             "\nThis update is re-applied against the issue's current body at "
-            "apply time and never removes existing content.\n</details>\n"
+            "apply time and never removes existing content. Missing official fields "
+            "are added; existing human prose is preserved.\n</details>\n"
         )
         return preview
     if (
@@ -2457,7 +2472,7 @@ def _identity_matches(
     Fails closed (returns False) whenever there is nothing concrete to
     confirm identity against, rather than assuming an untouched match.
     """
-    return package_identities_match(str(expected_package or ""), parsed.name)
+    return package_identities_match(str(expected_package or ""), parsed.identity)
 
 
 def _translate_guarded_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -2523,7 +2538,8 @@ def _execute_discovery_create(
         if REVIEW_LABEL not in issue.labels
         and marker in issue.body.splitlines()
         and package_identities_match(
-            payload.get("package_name"), parse_issue_body(issue.body).name
+            payload.get("package_identity") or payload.get("package_name"),
+            parse_issue_body(issue.body).identity,
         )
     ]
     if len(created) > 1:
@@ -2620,7 +2636,7 @@ def _execute_discovery_update(
         }
 
     additions = payload.get("field_additions") or {}
-    updated_body = current_issue.body
+    updated_body = ensure_issue_fields(current_issue.body, str(parsed.name or ""))
     updated_body = append_field_values(
         updated_body, "CVEs", additions.get("cves") or []
     )
@@ -2883,21 +2899,17 @@ def _persist_feedback_receipt(
     ]
     if not feedback_results:
         return bool(confirmed)
-    selection_digest = hashlib.sha256(
-        json.dumps(
-            sorted(checked_ids), separators=(",", ":"), ensure_ascii=True
-        ).encode("utf-8")
-    ).hexdigest()
-    desired = {
-        (result["action_id"], manifest["digest"], selection_digest)
+    existing = {(item["action_id"], item["manifest_digest"]) for item in confirmed}
+    # A retry of the same feedback action is not a new reviewer decision.
+    # Unrelated checkbox changes must not refresh its timestamp past a revocation.
+    feedback_results = [
+        result
         for result in feedback_results
-    }
-    existing = {
-        (item["action_id"], item["manifest_digest"], item["selection_digest"])
-        for item in confirmed
-    }
-    if desired <= existing:
+        if (result["action_id"], manifest["digest"]) not in existing
+    ]
+    if not feedback_results:
         return True
+    desired = {(result["action_id"], manifest["digest"]) for result in feedback_results}
     lines = [
         "## Security-triage reviewer feedback receipt",
         "",
@@ -2929,8 +2941,7 @@ def _persist_feedback_receipt(
         review_repository=apply_context.review_repo,
     )
     if not desired <= {
-        (item["action_id"], item["manifest_digest"], item["selection_digest"])
-        for item in persisted
+        (item["action_id"], item["manifest_digest"]) for item in persisted
     }:
         raise ManifestValidationError(
             "Feedback receipt was not durably persisted by trusted automation"

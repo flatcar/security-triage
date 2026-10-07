@@ -7,6 +7,7 @@ from security_triage.issues import load_issue_fixture
 from security_triage.models import HeuristicModelClient
 from security_triage.records import Issue, SBOMPackage, SourceEntry
 from security_triage.reporting import render_discovery_markdown
+from security_triage.review import ReviewContext, build_review_batch
 from security_triage.sbom import SBOMIndex, load_sbom_fixture
 from security_triage.sources import load_source_fixture
 
@@ -192,6 +193,35 @@ def test_discovery_existing_fixed_version_in_summary_does_not_force_update():
     )["records"][0]
     assert record["decision"]["action"] == "ignore"
     assert record["upstream_activity"]["new_fixed_versions"] == []
+
+
+def test_severity_only_escalation_survives_already_tracked_and_compact_filters():
+    document = _cares_discovery(
+        [_cares_entry(metadata={"severity": "critical"})], [_cares_issue()]
+    )
+    [record] = document["records"]
+    assert record["decision"]["action"] == "update_existing_issue"
+    assert record["upstream_activity"]["requires_issue_update"]
+    assert record["upstream_activity"]["new_severity"] == "critical"
+    assert "critical" in record["proposed_update"]["comment_body"]
+    batch = build_review_batch(
+        ReviewContext(
+            advisory_repo="flatcar/Flatcar",
+            review_repo="flatcar/security-triage",
+            run_id="severity",
+            generated_at="2026-10-07T12:00:00Z",
+        ),
+        document,
+    )
+    assert len(batch.groups) == 1
+    assert not batch.omissions
+    for severity in ("normal", "unspecified", "CRITICAL"):
+        existing = _cares_issue(summary="Fixed in 1.34.6. Gentoo severity: critical.")
+        [unchanged] = _cares_discovery(
+            [_cares_entry(metadata={"severity": severity})], [existing]
+        )["records"]
+        assert unchanged["decision"]["action"] == "ignore"
+        assert not unchanged["upstream_activity"]["requires_issue_update"]
 
 
 def test_discovery_new_fixed_version_remains_actionable_with_same_cve():
@@ -394,11 +424,12 @@ def test_discovery_updates_existing_issue_for_new_bugzilla_comment():
         == "new_bugzilla_aliases"
     )
     assert (
-        record["proposed_update"]["detected_changes"][2]["kind"] == "bugzilla_severity"
-    )
-    assert (
-        record["proposed_update"]["detected_changes"][3]["kind"]
+        record["proposed_update"]["detected_changes"][2]["kind"]
         == "new_bugzilla_comment"
+    )
+    assert not any(
+        change["kind"] == "bugzilla_severity"
+        for change in record["proposed_update"]["detected_changes"]
     )
     assert "Bugzilla comment #1" in record["proposed_update"]["comment_body"]
     markdown = render_discovery_markdown(document)

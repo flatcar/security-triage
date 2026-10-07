@@ -95,7 +95,7 @@ class CleanupWorkflow:
     def _process_issue(self, issue: Issue) -> dict[str, Any]:
         self.progress_logger.info(f"Parsing advisory issue #{issue.number}")
         parsed_issue = _parse_or_normalize_issue(issue, self.model_client)
-        package_name = parsed_issue.get("name")
+        package_name = parsed_issue.get("package_identity", parsed_issue.get("name"))
         cves = parsed_issue.get("cves") or []
         self.progress_logger.info(
             f"Issue #{issue.number} package: {package_name or 'unknown'}; CVEs: {len(cves)}"

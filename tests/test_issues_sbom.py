@@ -44,6 +44,45 @@ def test_list_all_issues_fails_closed_on_malformed_response(monkeypatch):
         GitHubIssueClient("flatcar/security-triage").list_issues()
 
 
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "A vulnerability in the Rust crate tar.",
+        "Upstream: https://rustsec.org/advisories/RUSTSEC-2026-0001.html",
+        "Package URL: pkg:cargo/tar",
+        "Note: Canonical package identity: `pkg:cargo/other`.",
+        "Note: Canonical package identity: `pkg:cargo/tar@1.0`.",
+        "Note: Canonical package identity: `pkg:cargo/tar`."
+        " Note: Canonical package identity: `pkg:cargo/tar`.",
+    ],
+)
+def test_ambiguous_or_conflicting_summary_identity_never_matches_native_tar(summary):
+    body = (
+        "Name: tar\nCVEs: CVE-2026-12345\nCVSSs: n/a\n"
+        f"Action Needed: TBD\nSummary: {summary}\n\nrefmap.gentoo: TBD"
+    )
+    parsed = parse_issue_body(body)
+    assert parsed.identity == ""
+    assert not parsed.valid
+    advisory = issues_module.issue_from_api(
+        {"number": 1, "title": "update: tar", "body": body, "labels": []}
+    )
+    assert not find_existing_issue_matches({"package_name": "tar"}, [advisory])
+    assert not find_existing_issue_matches(
+        {"package_purl": "pkg:cargo/tar"}, [advisory]
+    )
+
+
+def test_legacy_native_names_remain_compatible_but_do_not_authorize_cargo_updates():
+    advisory = issues_module.issue_from_api(
+        {"number": 1, "title": "update: tar", "body": "Name: tar", "labels": []}
+    )
+    assert find_existing_issue_matches({"package_name": "tar"}, [advisory])
+    assert not find_existing_issue_matches(
+        {"package_purl": "pkg:cargo/tar"}, [advisory]
+    )
+
+
 def test_fetch_open_update_issues_includes_ordinary_updates_not_review_issues(
     monkeypatch,
 ):

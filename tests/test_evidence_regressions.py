@@ -9,6 +9,7 @@ from security_triage.discovery import DiscoveryWorkflow
 from security_triage.models import HeuristicModelClient
 from security_triage.reasoning import build_discovery_evidence_bundle
 from security_triage.records import Issue, SBOMPackage, SourceEntry
+from security_triage.review import ReviewContext, build_review_batch
 from security_triage.rules import (
     apply_discovery_guardrails,
     coerce_extraction,
@@ -674,6 +675,75 @@ def test_shared_action_cannot_hide_a_higher_per_cve_summary_requirement():
     assert not record["cve_coverage"]["complete"]
 
 
+@pytest.mark.parametrize(
+    "summary,complete",
+    [
+        ("CVE-2026-11111 fixed in 260 or 259.5.", True),
+        ("CVE-2026-11111 fixed in 259.5 or 260.", True),
+        ("CVE-2026-11111 fixed in 260 or 259.7.", False),
+        ("CVE-2026-11111 fixed in 260 and 259.5.", False),
+        ("CVE-2026-11111 fixed in 260 or 259.5 and 258.8.", False),
+        ("CVE-2026-11111 fixed in 260 or 259.5-rc1.", False),
+        ("CVE-2026-11111 partially fixed in 260 or 259.5.", False),
+    ],
+)
+def test_summary_or_fix_coverage_preserves_branch_semantics(summary, complete):
+    coverage = fixed_version_coverage(
+        "update to >= 260 or 259.5", ["CVE-2026-11111"], summary
+    )
+    assert coverage["complete"] is complete
+
+
+@pytest.mark.parametrize(
+    "version,status",
+    [
+        ("259.6", "remediated_in_current_production_sbom"),
+        ("259.4", "not_remediated_in_current_production_sbom"),
+    ],
+)
+def test_cleanup_summary_alternatives_match_action_alternative_satisfaction(
+    version, status
+):
+    advisory = issue(
+        "systemd",
+        "update to >= 260 or 259.5",
+        cves=["CVE-2026-11111"],
+        summary="CVE-2026-11111 fixed in 260 or 259.5.",
+    )
+    [record] = CleanupWorkflow(
+        HeuristicModelClient(), index("systemd", version), [advisory]
+    ).run()["records"]
+    assert record["cve_coverage"]["complete"]
+    assert record["status"] == status
+
+
+def test_alternative_summary_for_one_cve_does_not_cover_other_cve_requirements():
+    coverage = fixed_version_coverage(
+        "update to >= 260 or 259.5",
+        ["CVE-2026-11111", "CVE-2026-22222"],
+        "CVE-2026-11111 fixed in 260 or 259.5. CVE-2026-22222 fixed in 260.",
+    )
+    assert not coverage["complete"]
+    assert any("CVE-2026-22222" in reason for reason in coverage["reasons"])
+
+
+def test_cleanup_uses_canonical_identity_instead_of_foreign_display_name():
+    advisory = issue(
+        "tar",
+        "update to >= 1.2.3",
+        cves=["CVE-2026-12345"],
+        summary="Upstream fix. Note: Canonical package identity: `pkg:cargo/tar`.",
+    )
+    record = CleanupWorkflow(
+        OverconfidentModel(),
+        index("tar", "9.0", purls=["pkg:gentoo/app-arch/tar"]),
+        [advisory],
+    ).run()["records"][0]
+    assert record["package_from_issue"] == "pkg:cargo/tar"
+    assert record["status"] == "needs_manual_review"
+    assert record["recommended_action"] == "manual_review"
+
+
 def test_package_presence_does_not_override_explicit_affected_version_range():
     _, relevance, decision, _ = decide(
         entry("c-ares", "Affected versions: < 1.34.7\nFixed in 1.34.7"),
@@ -681,6 +751,37 @@ def test_package_presence_does_not_override_explicit_affected_version_range():
     )
     assert relevance["affectedness_assessment"]["status"] == "not_affected"
     assert decision["action"] == "ignore"
+
+
+@pytest.mark.parametrize("omit_second_range", [False, True])
+def test_multiple_cves_cannot_be_excluded_by_one_advisory_range(omit_second_range):
+    source = entry(
+        "expat",
+        "CVE-2026-12345\nAffected versions: < 2.0\n"
+        "CVE-2026-22222\n"
+        + ("Affected versions: < 3.0\n" if omit_second_range else "")
+        + "Fixed in 3.0",
+    )
+
+    class PartialRangeModel(HeuristicModelClient):
+        def extract_advisory(self, source):
+            result = super().extract_advisory(source)
+            result["affected_versions"] = ["< 2.0"]
+            return result
+
+    record = DiscoveryWorkflow(PartialRangeModel(), index("expat", "2.5"), []).run(
+        [source], "", ""
+    )["records"][0]
+    assert record["decision"]["action"] == "needs_manual_review"
+    assert record["proposed_issue"] is None
+    assert set(record["llm_extraction"]["cves"]) == {
+        "CVE-2026-12345",
+        "CVE-2026-22222",
+    }
+    assert any(
+        "coverage" in reason or "per-CVE" in reason
+        for reason in record["manual_review_reasons"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -967,6 +1068,46 @@ def test_actual_linux_kernel_still_routes_but_util_linux_does_not():
     source.title = "util-linux: Linux kernel interaction"
     _, _, userspace_decision, _ = decide(source, index("util-linux"))
     assert userspace_decision["action"] == "create_issue"
+
+
+@pytest.mark.parametrize(
+    "package,extracted_cve",
+    [
+        ("expat", "CVE-2026-12345"),
+        ("util-linux", "CVE-2026-12345"),
+        ("linux-kernel", "CVE-2026-99999"),
+    ],
+)
+def test_ungrounded_kernel_extraction_stays_manual_and_visible(package, extracted_cve):
+    class IncorrectKernelModel(HeuristicModelClient):
+        def extract_advisory(self, source):
+            return {
+                **super().extract_advisory(source),
+                "package_name": "linux-kernel",
+                "cves": [extracted_cve],
+                "evidence_validation": {"status": "validated", "errors": []},
+                "confidence": "high",
+            }
+
+    document = DiscoveryWorkflow(IncorrectKernelModel(), index(package), []).run(
+        [entry(package)], "", ""
+    )
+    [record] = document["records"]
+    assert record["llm_extraction"]["evidence_validation"]["errors"]
+    assert record["decision"]["action"] == "needs_manual_review"
+    assert record["flatcar_relevance"]["status"] == "needs_manual_review"
+    assert record["proposed_issue"] is None
+    batch = build_review_batch(
+        ReviewContext(
+            advisory_repo="flatcar/Flatcar",
+            review_repo="flatcar/security-triage",
+            run_id="invalid-kernel",
+            generated_at="2026-10-07T12:00:00Z",
+        ),
+        document,
+    )
+    assert len(batch.groups) == 1
+    assert not batch.omissions
 
 
 def test_unaffected_range_cannot_be_extracted_as_affected_and_hide_vulnerable_package():

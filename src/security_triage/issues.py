@@ -16,6 +16,7 @@ from .rules import (
     active_markdown_text,
     advisory_issue_query,
     extract_cves,
+    issue_identity_from_summary,
     package_identities_match,
     parse_cvss_scores,
     validate_repo_name,
@@ -379,6 +380,9 @@ def parse_issue_body(body: str) -> ParsedIssue:
     cves = extract_cves(cve_field)
     if not cves and cve_field and cve_field.lower() not in {"n/a", "tbd", "none"}:
         cves = [part.strip() for part in cve_field.split(",") if part.strip()]
+    identity = issue_identity_from_summary(
+        active_fields.get("Name"), active_fields.get("Summary")
+    )
     return ParsedIssue(
         name=active_fields.get("Name"),
         cves=cves,
@@ -386,14 +390,16 @@ def parse_issue_body(body: str) -> ParsedIssue:
         action_needed=active_fields.get("Action Needed"),
         summary=active_fields.get("Summary"),
         gentoo_ref=active_fields.get("refmap.gentoo"),
-        valid=not missing,
+        valid=not missing and identity != "",
         missing_fields=missing,
+        package_identity=identity,
     )
 
 
 def parsed_issue_to_dict(parsed: ParsedIssue) -> dict[str, Any]:
     return {
         "name": parsed.name,
+        "package_identity": parsed.identity,
         "cves": parsed.cves,
         "cvss_scores": parsed.cvss_scores,
         "action_needed": parsed.action_needed,
@@ -432,8 +438,8 @@ def find_existing_issue_matches(
             continue
         parsed = parse_issue_body(issue.body)
         issue_package = (
-            parsed.name
-            if parsed.name is not None
+            parsed.identity
+            if parsed.identity is not None
             else issue_package_from_title(issue.title) or ""
         )
         issue_cves = set(parsed.cves)

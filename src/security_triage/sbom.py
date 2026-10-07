@@ -367,30 +367,37 @@ def fixed_version_coverage(
             else len(summary_text)
         )
         clause = summary_text[match.end() : end]
-        summary_versions = [
-            version
-            for item in source_fixed_version_evidence(clause)
-            for version in item["versions"]
-        ]
-        summary_versions.extend(
-            re.findall(r"\bbefore\s+v?([0-9][0-9A-Za-z._+:-]*)", clause)
+        summary_requirements = source_fixed_version_evidence(clause)
+        summary_requirements.extend(
+            {"versions": [version.rstrip(".,;")], "semantics": "and", "quote": ""}
+            for version in re.findall(r"\bbefore\s+v?([0-9][0-9A-Za-z._+:-]*)", clause)
         )
         action_versions = (
             requirements
             if fixed_version_requirements_are_alternatives(action)
             else [highest_fixed_version_requirement(requirements)]
         )
-        if any(
-            compare_simple_versions(
-                action_version, summary_version.rstrip(".,;")
-            ).result
-            != "at_or_above"
-            for summary_version in summary_versions
-            for action_version in action_versions
-        ):
-            reasons.append(
-                f"Action Needed does not cover the summary requirement for {match.group(0)}."
-            )
+        for requirement in summary_requirements:
+            alternatives = requirement["semantics"] == "or"
+            if alternatives and re.search(
+                r"\band\b", requirement["quote"], re.IGNORECASE
+            ):
+                reasons.append(
+                    f"Summary mixes AND/OR requirements for {match.group(0)}."
+                )
+                continue
+            # Every selectable action branch must cover this CVE's requirement,
+            # but an explicitly alternative summary needs only one of its fixes.
+            if any(
+                evaluate_fixed_version_requirements(
+                    action_version, requirement["versions"], alternatives=alternatives
+                ).result
+                != "at_or_above"
+                for action_version in action_versions
+            ):
+                reasons.append(
+                    f"Action Needed does not cover the summary requirement for {match.group(0)}."
+                )
     return {
         "complete": not reasons,
         "covered_cves": list(cves) if not reasons else [],

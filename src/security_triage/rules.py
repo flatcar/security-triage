@@ -297,6 +297,62 @@ def package_identities_match(left: str | None, right: str | None) -> bool:
     return False
 
 
+def canonical_identity_note(identity: str | None, name: str | None) -> str:
+    """Persist a qualified identity without changing the manual advisory fields."""
+    canonical = package_identity(identity)
+    if not canonical or canonical == package_identity(name):
+        return ""
+    if (
+        len(canonical) > 512
+        or not re.fullmatch(r"(?:pkg:[a-z0-9.+-]+/)?[A-Za-z0-9._~+%/-]+", canonical)
+        or "/" not in canonical
+        or not (
+            package_identities_match(canonical, name)
+            or package_identity(name)
+            in {canonical.partition("/")[2], canonical.rsplit("/", 1)[-1]}
+        )
+    ):
+        raise ValueError("Canonical package identity conflicts with the advisory name")
+    return f"Note: Canonical package identity: `{canonical}`."
+
+
+def issue_identity_from_summary(name: str | None, summary: str | None) -> str | None:
+    """None means legacy name-only; an empty string marks conflicting identity."""
+    text = summary or ""
+    marker = "canonical package identity"
+    if marker not in text.casefold():
+        # Legacy bare names with explicit foreign-ecosystem context are
+        # ambiguous, not authority to mutate a similarly named native package.
+        if "/" not in (name or "") and (
+            re.search(
+                r"\b(?:rust crate|cargo package|go module)\b", text, re.IGNORECASE
+            )
+            or "rustsec.org/advisories/" in text.casefold()
+            or any(
+                not package_identities_match(name, purl)
+                and package_identity(purl).rsplit("/", 1)[-1] == package_identity(name)
+                for purl in re.findall(r"\bpkg:[a-z0-9.+-]+/[^\s`<>]+", text)
+            )
+        ):
+            return ""
+        return None
+    matches = re.findall(
+        r"Note: Canonical package identity: `([^`\r\n]{1,512})`\.",
+        text,
+        re.IGNORECASE,
+    )
+    if len(matches) != 1 or text.casefold().count(marker) != 1:
+        return ""
+    identity = str(matches[0])
+    if identity != package_identity(identity) or "/" not in identity:
+        return ""
+    try:
+        canonical_identity_note(identity, name)
+    except ValueError:
+        return ""
+    return identity
+
+
 def parse_cvss_scores(values: list[Any] | str | None) -> list[str]:
     if values is None:
         return []
@@ -648,6 +704,10 @@ def validate_extraction_evidence(
             errors.append(
                 f"Affected range has no positive affected-context source evidence: {affected_range}"
             )
+    if result["affected_versions"] and affected_ranges - {
+        " ".join(value.split()).casefold() for value in result["affected_versions"]
+    }:
+        errors.append("Source affected-range coverage is incomplete.")
     omitted_cves = sorted(set(extract_cves(source_text)) - set(result["cves"]))
     if omitted_cves:
         errors.append(
@@ -940,12 +1000,20 @@ def apply_discovery_guardrails(
         and not validated_scope_entries
     )
 
+    validation = extraction.get("evidence_validation") or {}
+    if validation.get("status") != "validated" or validation.get("errors"):
+        manual_reasons.extend(
+            validation.get("errors")
+            or [
+                "Source extraction evidence was not validated at the workflow boundary."
+            ]
+        )
     canonical_identity = (
         extraction.get("package_identity")
         or extraction.get("package_purl")
         or package_name
     )
-    if is_kernel_advisory(canonical_identity, source_title):
+    if not manual_reasons and is_kernel_advisory(canonical_identity, source_title):
         relevance = {
             "status": "kernel_regular_update_flow",
             "scope": "production",
@@ -972,15 +1040,7 @@ def apply_discovery_guardrails(
         or relevance.get("status") == "kernel_regular_update_flow"
     ):
         manual_reasons.append(
-            "Canonical package identity does not identify the Linux kernel; model kernel routing is unsupported."
-        )
-    validation = extraction.get("evidence_validation") or {}
-    if validation.get("status") != "validated":
-        manual_reasons.extend(
-            validation.get("errors")
-            or [
-                "Source extraction evidence was not validated at the workflow boundary."
-            ]
+            "Source-validated package identity does not identify the Linux kernel; model kernel routing is unsupported."
         )
 
     if (extraction.get("evidence_validation") or {}).get(
@@ -1122,6 +1182,13 @@ def apply_discovery_guardrails(
                 },
             }
             if affected.result == "not_affected":
+                if len(extraction.get("cves") or []) != 1:
+                    manual_reasons.append(
+                        "An advisory-wide affected range does not establish coverage of every advisory ID; per-CVE range review is required."
+                    )
+                    relevance["affectedness_assessment"]["status"] = (
+                        "needs_manual_review"
+                    )
                 scope_assessments = []
                 for scope_entry in validated_scope_entries:
                     if scope_entry["scope"] == "production":
