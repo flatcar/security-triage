@@ -224,19 +224,15 @@ Use `discovery --sbom-source alpha` explicitly to compare against current Alpha.
 `--sbom-fixture` takes precedence over either source and remains offline, with
 local fixture provenance. Cleanup always uses current Alpha and has no source option.
 
-For new issue proposals, a narrow deterministic check skips already-fixed
-single-package/single-CVE advisories when a unique exact production package match
-meets a simple, source-grounded fixed version. It accepts standalone `Fixed in X`
-or `Action Needed: update to >= X` statements, with an explicit package field or
-package-prefixed title and matching high-confidence extraction. This is an optional
-shortcut, not a prerequisite for model relevance reasoning. Complex ranges,
-threaded advisories, backports, multiple packages/CVEs and SDK/sysext scope fall
-through to normal source-grounded model assessment. The model compares the selected
-SBOM with affected/fixed requirements and may ignore a proposal when all CVEs are
-fixed or not affected in the relevant Flatcar scope, including USE-flag exclusions.
-Uncertain matches, ranges, versions or scope require manual review. Nightly fixes
-are not described as released remediation, and existing issues still receive
-guarded additive upstream updates.
+Model-backed discovery compares the selected inventory with source-grounded
+affected/fixed requirements from advisory descriptions, metadata and comments.
+It may ignore a proposal when all CVEs are fixed or not affected in the relevant
+Flatcar scope, including USE-flag exclusions. Numeric version ordering alone is
+insufficient: a fix on one release series need not cover another series.
+Uncertain package identity, ranges, coverage or scope require manual review.
+Nightly evidence does not establish released remediation, and existing issues
+still receive guarded additive upstream updates. The local heuristic fallback
+retains its existing package/scope behavior; it does not evaluate version ranges.
 
 Discovery defaults to a seven-day processing window. Live sources are source-specific where structure is available:
 

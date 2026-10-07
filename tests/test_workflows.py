@@ -41,9 +41,9 @@ def test_discovery_workflow_fixture_decisions():
         record["llm_extraction"]["package_name"]: record
         for record in document["records"]
     }
-    assert records_by_package["openssl"]["decision"]["action"] == "ignore"
-    assert records_by_package["openssl"]["proposed_issue"] is None
-    assert "local SBOM fixture" in records_by_package["openssl"]["decision"]["reason"]
+    assert records_by_package["openssl"]["decision"]["action"] == "create_issue"
+    assert records_by_package["openssl"]["proposed_issue"]["title"] == "update: openssl"
+    assert "security" in records_by_package["openssl"]["proposed_issue"]["labels"]
     assert (
         records_by_package["rust-openssl"]["decision"]["action"]
         == "update_existing_issue"
@@ -61,7 +61,7 @@ def test_discovery_does_not_route_userspace_advisory_to_kernel_flow_from_content
         [
             SBOMPackage(
                 name="systemd",
-                version_info="259",
+                version_info="260",
                 spdx_id="SPDXRef-Package-systemd",
                 purls=[],
             )

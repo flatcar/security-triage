@@ -12,7 +12,6 @@ from security_triage.discovery import DiscoveryWorkflow
 from security_triage.http_utils import HTTPError
 from security_triage.models import HeuristicModelClient
 from security_triage.records import Issue, SourceEntry
-from security_triage.reporting import render_discovery_markdown
 from security_triage.rules import FLATCAR_PRODUCTION_SBOM_URL
 from security_triage.sbom import (
     FLATCAR_MAIN_VERSION_URL,
@@ -324,108 +323,7 @@ def test_existing_discovery_dry_run_wrapper_stays_offline(monkeypatch, tmp_path)
     )
 
 
-def test_old_alpha_proposes_but_fixed_nightly_ignores_with_heuristic():
-    old = _run(index=_sbom("3.2.3", "alpha"))["records"][0]
-    assert old["decision"]["action"] == "create_issue"
-    assert old["proposed_issue"]["title"] == "update: openssl"
-    assert set(old["proposed_issue"]["labels"]) == {"advisory", "security"}
-    document = _run()
-    record = document["records"][0]
-    assert record["decision"]["action"] == "ignore"
-    assert record["proposed_issue"] is None
-    assert record["fixed_version_evidence"]["fixed_version"] == "3.2.4"
-    assert f"Already fixed in main nightly {VERSION}" in record["decision"]["reason"]
-    assert "not released remediation" in record["decision"]["reason"]
-    assert NIGHTLY_URL in render_discovery_markdown(document)
-
-
-@pytest.mark.parametrize("package_field", [True, False])
-@pytest.mark.parametrize("fix", ["Fixed in 3.2.4", "Action Needed: update to >= 3.2.4"])
-def test_source_grounded_simple_fix_forms(package_field, fix):
-    entry = _entry()
-    entry.content = entry.content.replace("Fixed in 3.2.4", fix)
-    if not package_field:
-        entry.content = entry.content.replace("Package: openssl\n", "")
-    record = _run(entry=entry, index=_sbom("3.2.4-r1"))["records"][0]
-    assert record["decision"]["action"] == "ignore"
-    assert record["fixed_version_evidence"]["source_statement"] == fix
-
-
-@pytest.mark.parametrize(
-    "change",
-    [
-        "missing_version",
-        "prerelease",
-        "ambiguous_match",
-        "weak_match",
-        "purl_only",
-        "no_fix",
-        "tbd",
-        "backport",
-        "sdk",
-        "sysext",
-        "build",
-        "multi_cve",
-        "hidden_cve",
-        "multi_package",
-        "branch",
-        "qualified_fix",
-        "comments",
-        "different_package",
-        "affected_range",
-    ],
-)
-def test_uncertain_fixed_versions_do_not_suppress_tracking(change):
-    entry, index = _entry(), _sbom()
-    if change == "missing_version":
-        index = _sbom(None)
-    elif change == "prerelease":
-        index = _sbom("3.2.4-rc1")
-    elif change == "ambiguous_match":
-        index.packages.extend(_sbom("3.2.3").packages)
-    elif change == "weak_match":
-        index.packages[0].name = "openssl-library"
-    elif change == "purl_only":
-        index.packages[0].name = "different-name"
-        index.packages[0].purls = ["pkg:gentoo/dev-libs/openssl@3.2.4"]
-    elif change == "no_fix":
-        entry.content = entry.content.replace("Fixed in 3.2.4", "")
-    elif change == "tbd":
-        entry.content += "\nAction Needed: TBD"
-    elif change == "backport":
-        entry.description = "A backport must be verified separately."
-    elif change == "sdk":
-        entry.content += "\nSDK-only package."
-    elif change == "sysext":
-        entry.content += "\nSystem extension package."
-    elif change == "build":
-        entry.content += "\nBuild-only package."
-    elif change == "multi_cve":
-        entry.content += "\nCVE-2026-54321 is also affected."
-    elif change == "hidden_cve":
-        entry.raw = {"additional_cve": "CVE-2026-54321"}
-    elif change == "multi_package":
-        entry.content += "\nPackage: libgcrypt"
-    elif change == "branch":
-        entry.content = entry.content.replace(
-            "Fixed in 3.2.4", "Fixed in 3.2.4 or 3.1.8"
-        )
-    elif change == "qualified_fix":
-        entry.content = entry.content.replace("Fixed in 3.2.4", "Not fixed in 3.2.4")
-    elif change == "comments":
-        entry.comments = [{"text": "The scope is being discussed."}]
-    elif change == "different_package":
-        entry.content = entry.content.replace(
-            "Fixed in 3.2.4", "libgcrypt fixed in 3.2.4"
-        )
-    elif change == "affected_range":
-        entry.content = entry.content.replace("< 3.2.4", "< 4.0")
-    record = _run(entry=entry, index=index)["records"][0]
-    assert record["decision"]["action"] in {"create_issue", "needs_manual_review"}
-    assert record["fixed_version_evidence"] is None
-
-
-def test_live_like_multi_cve_gentoo_model_uses_nightly_without_shortcut():
+def test_live_like_multi_cve_gentoo_model_uses_selected_alpha_or_nightly_inventory():
     cves = ["CVE-2026-12345", "CVE-2026-54321"]
     description = (
         "Upstream reports two certificate validation issues, CVE-2026-12345 and "
@@ -465,7 +363,6 @@ def test_live_like_multi_cve_gentoo_model_uses_nightly_without_shortcut():
             }
 
         def decide_relevance(self, bundle):
-            assert bundle["fixed_version_evidence"] is None
             assert bundle["source_entry"]["description"] == description
             assert bundle["source_entry"]["comments"] == [comment]
             assert bundle["source_entry"]["new_comments"] == [comment]
@@ -512,8 +409,46 @@ def test_live_like_multi_cve_gentoo_model_uses_nightly_without_shortcut():
     assert nightly["decision"]["action"] == "ignore"
     assert nightly["proposed_issue"] is None
     assert nightly["manual_review_reasons"] == []
-    assert nightly["fixed_version_evidence"] is None
     assert "both CVEs share this fix" in nightly["decision"]["reason"]
+
+
+def test_vulnerable_newer_release_series_preserves_model_create_decision():
+    entry = _entry()
+    entry.content = (
+        "Package: openssl\nCVE: CVE-2026-12345\n"
+        "For OpenSSL 3.0:\nFixed in 3.0.18\n"
+        "OpenSSL 3.2.3 remains vulnerable."
+    )
+    reason = (
+        "The 3.0.18 fix applies only to OpenSSL 3.0. "
+        "The main nightly package is 3.2.3, which upstream says remains vulnerable."
+    )
+
+    class ReleaseSeriesModel(HeuristicModelClient):
+        def decide_relevance(self, bundle):
+            assert bundle["sbom_metadata"]["provenance"]["source"] == "nightly"
+            assert bundle["sbom_package_matches"][0]["versionInfo"] == "3.2.3"
+            assert bundle["source_entry"]["content"] == entry.content
+            # A partial first-pass extraction must not override the model's
+            # subsequent branch-aware assessment of the full source evidence.
+            assert bundle["llm_extraction"]["fixed_versions"] == ["3.0.18"]
+            assert bundle["llm_extraction"]["affected_versions"] == []
+            result = super().decide_relevance(bundle)
+            result["flatcar_relevance"].update(
+                status="relevant", scope="production", evidence=[entry.content]
+            )
+            result["decision"].update(
+                action="create_issue", confidence="high", reason=reason
+            )
+            return result
+
+    record = _run(entry=entry, index=_sbom("3.2.3"), model=ReleaseSeriesModel())[
+        "records"
+    ][0]
+    assert record["decision"]["action"] == "create_issue"
+    assert record["decision"]["reason"] == reason
+    assert record["proposed_issue"] is not None
+    assert record["manual_review_reasons"] == []
 
 
 @pytest.mark.parametrize(
@@ -527,7 +462,6 @@ def test_normal_model_exclusions_survive_exact_sbom_matches(reason):
     class ExclusionModel(HeuristicModelClient):
         def decide_relevance(self, bundle):
             assert bundle["sbom_package_matches"][0]["match_type"] == "exact_name"
-            assert bundle["fixed_version_evidence"] is None
             result = super().decide_relevance(bundle)
             result["flatcar_relevance"]["status"] = "not_relevant"
             result["flatcar_relevance"]["evidence"] = [reason]
@@ -541,27 +475,6 @@ def test_normal_model_exclusions_survive_exact_sbom_matches(reason):
     assert record["decision"]["reason"] == reason
     assert record["manual_review_reasons"] == []
     assert record["proposed_issue"] is None
-
-
-@pytest.mark.parametrize("change", ["low_confidence", "hidden_range", "title_package"])
-def test_uncertain_source_cannot_be_overruled_by_extraction(change):
-    class IncompleteModel(HeuristicModelClient):
-        def extract_advisory(self, entry):
-            extraction = super().extract_advisory(entry)
-            if change == "low_confidence":
-                extraction["confidence"] = "low"
-            if change == "hidden_range":
-                extraction["affected_versions"] = []
-            return extraction
-
-    entry = _entry()
-    if change == "hidden_range":
-        entry.content = entry.content.replace("< 3.2.4", "< 4.0")
-    elif change == "title_package":
-        entry.title = "libgcrypt: another package is affected"
-    record = _run(entry=entry, model=IncompleteModel())["records"][0]
-    assert record["decision"]["action"] in {"create_issue", "needs_manual_review"}
-    assert record["fixed_version_evidence"] is None
 
 
 @pytest.mark.parametrize("change", ["comment", "cve"])
@@ -587,7 +500,6 @@ def test_fixed_nightly_does_not_suppress_additive_existing_issue_update(change):
         entry.content += "\nCVE: CVE-2026-54321"
     record = _run(entry=entry, issues=[issue])["records"][0]
     assert record["decision"]["action"] == "update_existing_issue"
-    assert record["fixed_version_evidence"] is None
     update = record["proposed_update"]
     assert update["matched_existing_issue"]["body"] == body
     if change == "comment":

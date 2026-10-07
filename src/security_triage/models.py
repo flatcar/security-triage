@@ -1378,7 +1378,7 @@ When SBOM matches are weak substring matches, explicitly judge whether each cand
 Do not invent Flatcar package evidence.
 Use sbom_metadata.provenance to identify the inventory actually selected. Main nightly is an unreleased build candidate, not evidence of released remediation or a successful full CI run.
 Compare the selected SBOM package versions with source-grounded affected/fixed requirements from advisory descriptions, metadata and comments. You may ignore a new proposal when evidence shows all CVEs are fixed or not affected in the relevant Flatcar scope, including USE-flag exclusions. Confirm package identity, applicable branches/ranges, scope and coverage of every CVE; version ordering alone is insufficient. Prefer needs_manual_review when any of these are uncertain.
-fixed_version_evidence is an optional bounded shortcut, not a prerequisite for normal relevance or affected-version reasoning. Never suppress an existing issue's upstream updates on the basis of nightly versions, or infer released cleanup from nightly evidence.
+Never suppress an existing issue's upstream updates on the basis of nightly versions, or infer released cleanup from nightly evidence.
 """.strip()
 
 ISSUE_NORMALIZATION_SYSTEM_PROMPT = f"""

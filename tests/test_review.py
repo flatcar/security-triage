@@ -1038,11 +1038,6 @@ def test_apply_completed_applies_only_checked_conflict_free_actions_end_to_end()
             issue.number, issue.title, issue.body, issue.labels, state="open"
         )
     sbom = load_sbom_fixture(str(FIXTURES / "sbom.json"))
-    # Keep a genuine create action in this apply-gate test: the standard fixture
-    # already includes the OpenSSL fix, which discovery now correctly ignores.
-    for package in sbom.packages:
-        if package.name == "openssl":
-            package.version_info = "3.2.3"
     entries = load_source_fixture(str(FIXTURES / "discovery_entries.json"))
     discovery_document = DiscoveryWorkflow(
         HeuristicModelClient(), sbom, issues, target_repo=REPO
