@@ -12,6 +12,8 @@ def build_discovery_evidence_bundle(
     extraction: dict[str, Any],
     sbom_matches: list[dict[str, Any]],
     existing_issue_matches: list[dict[str, Any]],
+    sbom_metadata: dict[str, Any] | None = None,
+    fixed_version_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "record_id": record_id,
@@ -31,6 +33,8 @@ def build_discovery_evidence_bundle(
         },
         "llm_extraction": extraction,
         "sbom_package_matches": sbom_matches,
+        "sbom_metadata": sbom_metadata or {},
+        "fixed_version_evidence": fixed_version_evidence,
         "sbom_match_review": _sbom_match_review(sbom_matches),
         "existing_issue_matches": existing_issue_matches,
         "official_rules_summary": [
@@ -39,6 +43,9 @@ def build_discovery_evidence_bundle(
             "Production SBOM evidence is strong production-image evidence; SDK and sysext scopes need labels and explicit evidence.",
             "Kernel CVEs must use kernel_regular_update_flow.",
             "Prefer needs_manual_review when Flatcar relevance, versions, or duplicate state are ambiguous.",
+            "Main nightly inventory is not a release or proof that all CI passed. Do not use it to claim released remediation or close existing advisories.",
+            "Compare selected SBOM versions with source-grounded affected/fixed requirements, covering all CVEs and the relevant Flatcar scope, including USE flags. Prefer manual review if uncertain.",
+            "fixed_version_evidence is an optional shortcut, not a requirement for model relevance or affected-version reasoning.",
         ],
     }
 

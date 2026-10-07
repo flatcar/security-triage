@@ -1065,6 +1065,40 @@ def _display_body(text: Any) -> str:
     return _neutralize_html_comments(str(text or ""))
 
 
+def _provenance_code(value: Any) -> str:
+    """Keep report-supplied provenance on one line inside an inert code span."""
+    text = _md_escape(value or "not supplied").replace("`", "\u02cb")
+    return "`" + text.replace("@", "@\u200b") + "`"
+
+
+def _discovery_provenance_lines(record: dict[str, Any]) -> list[str]:
+    provenance = record.get("sbom_provenance")
+    if not isinstance(provenance, dict) or not provenance:
+        return []
+    source = provenance.get("source")
+    note = {
+        "nightly": (
+            "unreleased main candidate; not released remediation or proof that all CI passed"
+        ),
+        "alpha": "current Alpha release inventory, not a nightly build",
+        "fixture": "local fixture; no claim about live Flatcar builds or releases",
+    }.get(str(source), "release status unknown")
+    lines = [f"- Discovery SBOM source: {_provenance_code(source)} ({note})."]
+    if source == "nightly" or provenance.get("version"):
+        lines.append(
+            f"- Discovery SBOM version: {_provenance_code(provenance.get('version'))}"
+        )
+    if source == "fixture":
+        lines.append(
+            f"- Discovery SBOM fixture: {_provenance_code(provenance.get('fixture_path'))}"
+        )
+    else:
+        lines.append(
+            f"- Discovery SBOM URL: {_provenance_code(provenance.get('sbom_url'))}"
+        )
+    return lines
+
+
 def _render_candidate_preview(candidate: ActionCandidate) -> str:
     payload = candidate.payload
     if candidate.kind == DISCOVERY_KIND_CREATE and payload:
@@ -1174,6 +1208,7 @@ def _render_discovery_group(group: DecisionGroup, index: int) -> str:
             f"(confidence: {decision.get('confidence')})"
         ),
     ]
+    lines.extend(_discovery_provenance_lines(record))
     sbom_matches = record.get("sbom_package_matches") or []
     if sbom_matches:
         lines.append(

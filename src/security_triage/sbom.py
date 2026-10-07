@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-from .http_utils import fetch_json
+from .http_utils import HTTPError, fetch_json, fetch_text
 from .io_utils import load_structured_file
 from .records import SBOMPackage
 from .rules import FLATCAR_PRODUCTION_SBOM_URL, active_markdown_text, normalize_name
+
+FLATCAR_MAIN_VERSION_URL = (
+    "https://raw.githubusercontent.com/flatcar/scripts/main/"
+    "sdk_container/.repo/manifests/version.txt"
+)
+FLATCAR_NIGHTLY_IMAGE_BASE_URL = "https://bincache.flatcar-linux.net/images/amd64"
+_NIGHTLY_VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+\+nightly-[0-9]{8}-[0-9]{4}")
 
 _REQUIREMENT_RE = re.compile(
     r"(?:>=|at\s+least|(?:update|upgrade)\s+to\s+>=?)\s*v?([0-9][0-9A-Za-z._+:-]*)",
@@ -108,7 +116,91 @@ def load_sbom_fixture(path: str) -> SBOMIndex:
     payload = load_structured_file(path)
     if not isinstance(payload, dict):
         raise ValueError("SBOM fixture must be an SPDX JSON object")
-    return SBOMIndex.from_spdx(payload)
+    index = SBOMIndex.from_spdx(payload)
+    index.metadata["provenance"] = {
+        "source": "fixture",
+        "fixture_path": str(Path(path).resolve()),
+    }
+    return index
+
+
+def resolve_main_nightly_version(manifest: str) -> str:
+    """Read one literal assignment, never source or evaluate the shell manifest."""
+    assignments = [
+        line.strip()
+        for line in manifest.splitlines()
+        if re.match(r"^\s*(?:export\s+)?FLATCAR_VERSION(?:\s|=|$)", line)
+    ]
+    if len(assignments) != 1:
+        raise ValueError("Main manifest must contain exactly one FLATCAR_VERSION")
+    match = re.fullmatch(r"FLATCAR_VERSION=(.*)", assignments[0])
+    if match is None or not _NIGHTLY_VERSION_RE.fullmatch(match.group(1)):
+        raise ValueError("Main manifest FLATCAR_VERSION is not a final nightly version")
+    return match.group(1)
+
+
+def fetch_flatcar_discovery_sbom(source: str = "nightly") -> SBOMIndex:
+    """Pin main's latest candidate; an available SBOM does not prove CI passed."""
+    if source not in {"nightly", "alpha"}:
+        raise ValueError(f"Unsupported discovery SBOM source: {source}")
+    provenance: dict[str, Any] = {"source": source}
+    if source == "nightly":
+        try:
+            version = resolve_main_nightly_version(
+                fetch_text(FLATCAR_MAIN_VERSION_URL, accept="text/plain")
+            )
+        except (HTTPError, ValueError) as exc:
+            raise ValueError(
+                f"Cannot resolve main nightly manifest {FLATCAR_MAIN_VERSION_URL}: {exc}"
+            ) from exc
+        # Image uploads retain '+', unlike the SDK's Docker tag.
+        url = f"{FLATCAR_NIGHTLY_IMAGE_BASE_URL}/{version}/flatcar_production_image_sbom.json"
+        provenance.update(
+            version=version,
+            manifest_url=FLATCAR_MAIN_VERSION_URL,
+            architecture="amd64",
+        )
+    else:
+        url = FLATCAR_PRODUCTION_SBOM_URL
+    provenance["sbom_url"] = url
+    try:
+        payload = fetch_json(url, accept="application/json")
+        _validate_discovery_sbom(payload)
+        index = SBOMIndex.from_spdx(payload)
+    except (HTTPError, ValueError, TypeError, AttributeError) as exc:
+        raise ValueError(
+            f"Discovery {source} SBOM unavailable or invalid at {url}: {exc}. "
+            "No fallback was used; retry when the artifact is available."
+        ) from exc
+    index.metadata["provenance"] = provenance
+    return index
+
+
+def _validate_discovery_sbom(payload: Any) -> None:
+    """Reject missing inventory, while tolerating absent optional package fields."""
+    if not isinstance(payload, dict) or not re.fullmatch(
+        r"SPDX-2\.[0-9]+", str(payload.get("spdxVersion", ""))
+    ):
+        raise ValueError("Expected an SPDX JSON document")
+    packages = payload.get("packages")
+    if (
+        not isinstance(packages, list)
+        or not packages
+        or not all(isinstance(package, dict) for package in packages)
+    ):
+        raise ValueError("Expected a nonempty SPDX packages list of objects")
+    if not any(
+        isinstance(package.get("name"), str) and package["name"].strip()
+        for package in packages
+    ):
+        raise ValueError("SPDX inventory contains no named packages")
+    for package in packages:
+        for field in ("name", "versionInfo"):
+            if package.get(field) is not None and not isinstance(package[field], str):
+                raise ValueError(f"Invalid SPDX package {field}")
+        refs = package.get("externalRefs") or []
+        if not isinstance(refs, list) or not all(isinstance(ref, dict) for ref in refs):
+            raise ValueError("Invalid SPDX package externalRefs")
 
 
 def fetch_flatcar_production_sbom(url: str = FLATCAR_PRODUCTION_SBOM_URL) -> SBOMIndex:

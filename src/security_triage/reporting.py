@@ -30,9 +30,25 @@ def render_discovery_markdown(document: dict[str, Any]) -> str:
         f"Generated: {document.get('generated_at')}",
         f"Target repo: {document.get('target_repo')}",
         "",
-        "## Decisions",
-        "",
     ]
+    provenance = document.get("sbom_metadata", {}).get("provenance", {})
+    if provenance:
+        lines.extend(
+            [
+                f"SBOM source: {provenance.get('source')}",
+                f"SBOM: {provenance.get('sbom_url') or provenance.get('fixture_path')}",
+            ]
+        )
+        if provenance.get("source") == "nightly":
+            lines.extend(
+                [
+                    f"Main nightly version: {provenance.get('version')}",
+                    f"Manifest: {provenance.get('manifest_url')}",
+                    "Unreleased main nightly candidate; SBOM availability does not prove all CI passed or released remediation.",
+                ]
+            )
+        lines.append("")
+    lines.extend(["## Decisions", ""])
     if not document.get("records"):
         lines.append("No source entries were processed.")
     for record in document.get("records", []):

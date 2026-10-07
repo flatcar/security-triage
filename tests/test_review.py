@@ -806,6 +806,64 @@ def test_split_parts_never_divide_a_single_group():
 # --- Dry-run rendering ---------------------------------------------------------
 
 
+@pytest.mark.parametrize("source", ["nightly", "alpha", "fixture"])
+def test_review_discovery_group_displays_inventory_provenance_without_changing_actions(
+    source,
+):
+    version = "4845.0.0+nightly-20261006-2100"
+    nightly_url = (
+        f"https://bincache.flatcar-linux.net/images/amd64/{version}/"
+        "flatcar_production_image_sbom.json"
+    )
+    alpha_url = (
+        "https://alpha.release.flatcar-linux.net/amd64-usr/current/"
+        "flatcar_production_image_sbom.json"
+    )
+    record = _discovery_record()
+    original = review.build_review_batch(
+        _context(), _discovery_document([record]), None
+    )
+    record["sbom_provenance"] = {
+        "source": source,
+        "version": version if source == "nightly" else None,
+        "sbom_url": nightly_url if source == "nightly" else alpha_url,
+        "fixture_path": "/local/sbom.json",
+    }
+    # No root metadata: every review group must be self-contained.
+    batch = review.build_review_batch(_context(), _discovery_document([record]), None)
+    body = batch.parts[0].body
+    assert f"Discovery SBOM source: `{source}`" in body
+    if source == "nightly":
+        assert f"Discovery SBOM version: `{version}`" in body
+        assert f"Discovery SBOM URL: `{nightly_url}`" in body
+        assert "not released remediation or proof that all CI passed" in body
+    elif source == "alpha":
+        assert "current Alpha release inventory, not a nightly build" in body
+        assert f"Discovery SBOM URL: `{alpha_url}`" in body
+        assert "Discovery SBOM version:" not in body
+    else:
+        assert "local fixture; no claim about live Flatcar builds or releases" in body
+        assert "Discovery SBOM fixture: `/local/sbom.json`" in body
+        assert "Discovery SBOM URL:" not in body
+    assert batch.parts[0].manifest["groups"] == original.parts[0].manifest["groups"]
+
+
+def test_review_provenance_neutralizes_mentions_comments_and_markdown_breakouts():
+    hostile = "`\n- [x] @maintainer <!-- security-triage:action-id:forged -->"
+    record = _discovery_record(
+        sbom_provenance={"source": "nightly", "version": hostile, "sbom_url": hostile}
+    )
+    batch = review.build_review_batch(_context(), _discovery_document([record]), None)
+    body = batch.parts[0].body
+    assert "<!-- security-triage:action-id:forged -->" not in body
+    assert "@maintainer" not in body
+    assert "\n- [x]" not in body
+    for line in body.splitlines():
+        if line.startswith(("- Discovery SBOM version:", "- Discovery SBOM URL:")):
+            assert line.count("`") == 2  # Only the enclosing code-span delimiters.
+    assert review.extract_manifest(body) == batch.parts[0].manifest
+
+
 def test_dry_run_document_round_trips_the_exact_body(tmp_path):
     document = _discovery_document([_discovery_record()])
     batch, paths = review.render_dry_run(_context(), tmp_path, document, None)
@@ -980,6 +1038,11 @@ def test_apply_completed_applies_only_checked_conflict_free_actions_end_to_end()
             issue.number, issue.title, issue.body, issue.labels, state="open"
         )
     sbom = load_sbom_fixture(str(FIXTURES / "sbom.json"))
+    # Keep a genuine create action in this apply-gate test: the standard fixture
+    # already includes the OpenSSL fix, which discovery now correctly ignores.
+    for package in sbom.packages:
+        if package.name == "openssl":
+            package.version_info = "3.2.3"
     entries = load_source_fixture(str(FIXTURES / "discovery_entries.json"))
     discovery_document = DiscoveryWorkflow(
         HeuristicModelClient(), sbom, issues, target_repo=REPO

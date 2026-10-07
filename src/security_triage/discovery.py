@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import json
+import re
 from typing import Any
 
 from .console import NullProgressLogger, ProgressLogger
@@ -26,12 +28,13 @@ from .rules import (
     is_gentoo_reference,
     issue_labels,
     neutralize_mentions,
+    normalize_name,
     render_issue_body,
     sanitize_single_line,
     validate_discovery_document,
     validate_repo_name,
 )
-from .sbom import SBOMIndex
+from .sbom import SBOMIndex, compare_simple_versions
 from .time_utils import iso_now
 
 
@@ -83,6 +86,7 @@ class DiscoveryWorkflow:
                     {"record_id": record_id, "source": entry.source, "error": str(exc)}
                 )
                 record = self._manual_record(record_id, entry, str(exc))
+            record["sbom_provenance"] = self.sbom_index.metadata.get("provenance", {})
             records.append(record)
             decision = record.get("decision", {})
             package_name = (
@@ -107,6 +111,7 @@ class DiscoveryWorkflow:
             },
             "sources": _sources_summary(entries),
             "model": self.model_client.metadata(),
+            "sbom_metadata": self.sbom_index.metadata,
             "records": records,
             "errors": errors,
         }
@@ -144,8 +149,19 @@ class DiscoveryWorkflow:
                 covered_match,
                 upstream_activity,
             )
+        fixed_evidence = (
+            _fixed_version_evidence(entry, extraction, sbom_matches)
+            if not existing_issue_matches
+            else None
+        )
         evidence_bundle = build_discovery_evidence_bundle(
-            record_id, entry, extraction, sbom_matches, existing_issue_matches
+            record_id,
+            entry,
+            extraction,
+            sbom_matches,
+            existing_issue_matches,
+            self.sbom_index.metadata,
+            fixed_evidence,
         )
         self.debug_logger.log(
             "discovery_evidence_bundle", record_id=record_id, bundle=evidence_bundle
@@ -162,6 +178,23 @@ class DiscoveryWorkflow:
             existing_issue_matches,
             entry.title,
         )
+        if (
+            not existing_issue_matches
+            and decision["action"] == "create_issue"
+            and fixed_evidence
+            and relevance["scope"] == "production"
+        ):
+            reason = _fixed_version_reason(
+                fixed_evidence, self.sbom_index.metadata.get("provenance", {})
+            )
+            relevance = {
+                **relevance,
+                "status": "not_relevant",
+                "llm_decision": reason,
+                "reasons": [*relevance["reasons"], reason],
+                "evidence": [*relevance["evidence"], reason],
+            }
+            decision = {"action": "ignore", "confidence": "high", "reason": reason}
         if (
             upstream_activity["requires_issue_update"]
             and existing_issue_matches
@@ -195,6 +228,7 @@ class DiscoveryWorkflow:
             "llm_extraction": extraction,
             "flatcar_relevance": relevance,
             "sbom_package_matches": sbom_matches,
+            "fixed_version_evidence": fixed_evidence,
             "existing_issue_matches": existing_issue_matches,
             "decision": decision,
             "proposed_issue": proposed_issue,
@@ -238,6 +272,147 @@ class DiscoveryWorkflow:
             "manual_review_reasons": [reason],
             "evidence": [],
         }
+
+
+def _fixed_version_evidence(
+    entry: SourceEntry,
+    extraction: dict[str, Any],
+    matches: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Bounded proof for new, single-package/CVE advisories, not a range scanner.
+
+    A model-extracted target is insufficient: require a literal, standalone fix
+    statement and package identity in the source. Threaded, branch-specific and
+    otherwise complex advisories are left to normal model relevance assessment.
+    """
+    if (
+        extraction.get("confidence") != "high"
+        or len(matches) != 1
+        or matches[0].get("match_type") != "exact_name"
+        or len(extraction.get("cves", [])) != 1
+        or entry.comments
+        or entry.new_comments
+    ):
+        return None
+    source_text = "\n".join(
+        [
+            entry.title,
+            entry.content,
+            entry.description or "",
+            json.dumps(entry.metadata),
+            json.dumps(entry.raw),
+        ]
+    )
+    if set(extract_cves(source_text)) != set(extraction["cves"]):
+        return None
+    if re.search(
+        r"\b(?:sdk|sysext|system[-_ ]extension|build[-_ ]only|not[-_ ]shipped|"
+        r"TBD|backport\w*|branch\w*|slot\w*|epoch\w*|patch\w*|"
+        r"unfixed|pending|proposed|candidate|unconfirmed|reverted)\b|"
+        r"not\s+fixed|still\s+(?:affected|vulnerable)",
+        f"{source_text}\n{extraction.get('scope_assessment', '')}",
+        re.IGNORECASE,
+    ):
+        return None
+    package_lines = [
+        line.strip()
+        for line in entry.content.splitlines()
+        if re.match(r"\s*(?:Package|Name|Component)s?\s*:", line, re.IGNORECASE)
+    ]
+    if package_lines:
+        if len(package_lines) != 1:
+            return None
+        package_match = re.fullmatch(
+            r"(?:Package|Name|Component):\s*([A-Za-z0-9_.+/-]+)",
+            package_lines[0],
+            re.IGNORECASE,
+        )
+    else:
+        package_match = re.match(r"([A-Za-z0-9_.+/-]+):", entry.title)
+    if not package_match or normalize_name(package_match.group(1)) != normalize_name(
+        extraction["package_name"]
+    ):
+        return None
+    title_package = re.match(r"([A-Za-z0-9_.+/-]+):", entry.title)
+    if title_package and normalize_name(title_package.group(1)) != normalize_name(
+        extraction["package_name"]
+    ):
+        return None
+    # Only a standalone assertion is supported, not "not fixed in", proposed
+    # updates, branch alternatives, ranges or prose about another component.
+    fix_lines = [
+        line.strip()
+        for line in entry.content.splitlines()
+        if re.search(
+            r"\bfix(?:ed|es)?\b|(?:update|upgrade)\s+to|>=", line, re.IGNORECASE
+        )
+    ]
+    if len(fix_lines) != 1:
+        return None
+    fix_match = re.fullmatch(
+        r"(?:Fixed\s+in|Action Needed:\s*(?:update|upgrade)\s+to\s+>=)\s*"
+        r"(v?[0-9]+(?:\.[0-9]+){0,5}(?:-r[0-9]+)?)\.?",
+        fix_lines[0],
+        re.IGNORECASE,
+    )
+    if not fix_match:
+        return None
+    required = fix_match.group(1)
+    if extraction.get("fixed_versions") != [required] or not re.fullmatch(
+        rf"(?:update|upgrade)\s+to\s+>=\s*{re.escape(required)}",
+        extraction.get("action_needed", ""),
+        re.IGNORECASE,
+    ):
+        return None
+    for line in entry.content.splitlines():
+        if re.match(
+            r"\s*Affected(?: versions?)?:", line, re.IGNORECASE
+        ) and not re.fullmatch(
+            rf"\s*Affected(?: versions?)?:\s*<\s*{re.escape(required)}\s*",
+            line,
+            re.IGNORECASE,
+        ):
+            return None
+    # Do not ignore a contradictory/complex affected range on a model's say-so.
+    if any(
+        not re.fullmatch(rf"<\s*{re.escape(required)}", affected)
+        for affected in extraction.get("affected_versions", [])
+    ):
+        return None
+    comparison = compare_simple_versions(matches[0].get("versionInfo"), required)
+    if comparison.result != "at_or_above":
+        return None
+    return {
+        "package": matches[0]["name"],
+        "installed_version": matches[0]["versionInfo"],
+        "fixed_version": required,
+        "cves": extraction["cves"],
+        "source_statement": fix_lines[0],
+        "source_url": entry.source_url,
+        "comparison": comparison.reason,
+    }
+
+
+def _fixed_version_reason(evidence: dict[str, Any], provenance: dict[str, Any]) -> str:
+    if provenance.get("source") == "nightly":
+        inventory = f"main nightly {provenance.get('version')}"
+        caveat = "This is not released remediation or proof that all CI passed."
+    elif provenance.get("source") == "alpha":
+        inventory = "the selected Alpha production SBOM"
+        caveat = "This discovery decision does not close existing advisories."
+    elif provenance.get("source") == "fixture":
+        inventory = "the local SBOM fixture"
+        caveat = (
+            "Fixture evidence makes no claim about live Flatcar builds or releases."
+        )
+    else:
+        inventory = "the selected discovery SBOM"
+        caveat = "No release provenance was supplied."
+    return (
+        f"Already fixed in {inventory}: {evidence['package']} "
+        f"{evidence['comparison']}; source states '{evidence['source_statement']}' "
+        f"for {', '.join(evidence['cves'])}. {caveat}"
+    )
 
 
 def _record_id(entry: SourceEntry) -> str:
