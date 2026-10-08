@@ -35,6 +35,7 @@ class GitHubActionRunner:
         # action ID that was actually checked in the reviewed issue, even if a
         # caller bug elsewhere tried to widen the request.
         self.allowed_action_ids = allowed_action_ids
+        self.created_issues: list[dict[str, Any]] = []
 
     def action_allowed(self, action_id: str) -> bool:
         """Return True unless an explicit allowlist excludes ``action_id``.
@@ -68,7 +69,19 @@ class GitHubActionRunner:
                 blocked=True,
                 reason="Issue creation flag is disabled",
             )
-        response = self.client.create_issue(title, body, labels)
+        try:
+            response = self.client.create_issue(title, body, labels)
+        except Exception as exc:
+            return _failed_result(action_id, "create_issue", exc)
+        self.created_issues.append(
+            {
+                **response,
+                "title": title,
+                "body": body,
+                "labels": labels,
+                "state": "open",
+            }
+        )
         self.debug_logger.log(
             "github_review_create_issue", action_id=action_id, response=response
         )
@@ -113,7 +126,10 @@ class GitHubActionRunner:
                 reason="Refusing issue body update because it would remove "
                 "existing content: " + "; ".join(violations),
             )
-        response = self.client.update_issue_body(issue_number, updated_body)
+        try:
+            response = self.client.update_issue_body(issue_number, updated_body)
+        except Exception as exc:
+            return _failed_result(action_id, "update_issue_body", exc)
         self.debug_logger.log(
             "github_review_update_issue_body",
             action_id=action_id,
@@ -158,7 +174,10 @@ class GitHubActionRunner:
                 no_op=True,
                 reason="A comment carrying this action ID already exists on the issue",
             )
-        response = self.client.post_comment(issue_number, body)
+        try:
+            response = self.client.post_comment(issue_number, body)
+        except Exception as exc:
+            return _failed_result(action_id, "post_comment", exc)
         self.debug_logger.log(
             "github_review_post_comment",
             action_id=action_id,
@@ -190,7 +209,10 @@ class GitHubActionRunner:
             return _guarded_result(
                 action_id, "close_issue", no_op=True, reason="Issue is already closed"
             )
-        response = self.client.close_issue(issue_number)
+        try:
+            response = self.client.close_issue(issue_number)
+        except Exception as exc:
+            return _failed_result(action_id, "close_issue", exc)
         self.debug_logger.log(
             "github_review_close_issue",
             action_id=action_id,
@@ -215,4 +237,14 @@ def _guarded_result(
         "outcome": "blocked" if blocked else ("no_op" if no_op else "applied"),
         "reason": reason,
         "result": result,
+    }
+
+
+def _failed_result(action_id: str, action: str, exc: Exception) -> dict[str, Any]:
+    return {
+        "action_id": action_id,
+        "action": action,
+        "outcome": "failed",
+        "reason": f"GitHub {action} failed ({type(exc).__name__}); retry is safe",
+        "result": None,
     }

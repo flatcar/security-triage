@@ -69,6 +69,15 @@ def test_kernel_advisory_detection():
     assert is_kernel_advisory("linux-kernel", "Linux kernel CVE")
     assert not is_kernel_advisory("openssl", "OpenSSL CVE")
     assert not is_kernel_advisory("util-linux", "util-linux CVE")
+    assert not is_kernel_advisory("util-linux", "Linux kernel interaction")
+    assert not is_kernel_advisory("pkg:cargo/kernel", "kernel vulnerability")
+    assert not is_kernel_advisory("pkg:cargo/kernel", "Linux kernel interaction")
+    assert not is_kernel_advisory(
+        "pkg:golang/github.com/siyuan-note/siyuan/kernel", "kernel vulnerability"
+    )
+    assert is_kernel_advisory("sys-kernel/gentoo-kernel", "Gentoo kernel CVE")
+    assert not is_kernel_advisory(None, "SiYuan kernel package vulnerability")
+    assert is_kernel_advisory(None, "Linux kernel vulnerability")
 
 
 @pytest.mark.parametrize(

@@ -4,14 +4,74 @@ import re
 from typing import Any
 
 from .issues import parse_issue_body
-from .rules import extract_cves, sanitize_single_line
+from .rules import (
+    canonical_identity_note,
+    extract_cves,
+    package_identity,
+    render_issue_body,
+    sanitize_single_line,
+)
 
 _FIELD_LINE_RE = re.compile(
     r"^(?P<prefix>\s*(?:\*\*)?(?P<field>Name|CVEs|CVSSs|Action Needed|Summary|refmap\.gentoo)(?:\*\*)?:\s*)(?P<value>.*)$",
     re.IGNORECASE,
 )
 _URL_RE = re.compile(r"https?://[^\s,)\]>]+")
+_IDENTIFIER_RE = re.compile(
+    r"\b(?:CVE-\d{4}-\d{4,}|GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}|RUSTSEC-\d{4}-\d{4})\b",
+    re.IGNORECASE,
+)
 _PLACEHOLDERS = {"", "TBD", "N/A", "NONE"}
+
+
+def ensure_issue_fields(body: str, package_name: str) -> str:
+    """Add missing official fields in order, retaining every existing prose line."""
+    template = render_issue_body(package_name, [], [], None, None, None)
+    fields = [
+        (match.group("field"), line)
+        for line in template.splitlines()
+        if (match := _FIELD_LINE_RE.match(line))
+    ]
+    order = {field.casefold(): number for number, (field, _) in enumerate(fields)}
+    lines = body.splitlines()
+    if not any(_FIELD_LINE_RE.match(line) for line in lines):
+        return f"{body}\n\n{template}" if body else template
+    for field, default in fields:
+        if _find_field_line(lines, field) is not None:
+            continue
+        index = next(
+            (
+                number
+                for number, line in enumerate(lines)
+                if (match := _FIELD_LINE_RE.match(line))
+                and order[match.group("field").casefold()] > order[field.casefold()]
+            ),
+            len(lines),
+        )
+        lines.insert(index, default)
+    reference = _find_field_line(lines, "refmap.gentoo")
+    if reference and reference[0] > 0 and lines[reference[0] - 1].strip():
+        lines.insert(reference[0], "")
+    return "\n".join(lines)
+
+
+def with_package_identity(body: str, identity: str | None) -> str:
+    """Add the bounded canonical note to Summary; never overwrite another identity."""
+    parsed = parse_issue_body(body)
+    if "canonical package identity" in (parsed.summary or "").casefold():
+        if parsed.package_identity != package_identity(identity):
+            raise ValueError("Advisory Summary has a conflicting canonical identity")
+        return body
+    note = canonical_identity_note(identity, parsed.name)
+    if not note:
+        return body
+    lines = body.splitlines()
+    field_line = _find_field_line(lines, "Summary")
+    if field_line is None:
+        raise ValueError("Canonical identity requires an advisory Summary field")
+    index, _ = field_line
+    lines[index] = f"{lines[index]} {note}"
+    return "\n".join(lines)
 
 
 def append_field_values(body: str, field: str, values: list[Any]) -> str:
@@ -83,6 +143,16 @@ def removal_guard_violations(
     if not _is_placeholder(summary) and _compact(summary) not in _compact(updated_body):
         violations.append("existing Summary content would be removed")
 
+    updated_text = _compact(updated_body)
+    for line in existing_body.splitlines():
+        match = _FIELD_LINE_RE.match(line)
+        content = match.group("value") if match else line
+        if _is_placeholder(content):
+            continue
+        if _compact(content) not in updated_text:
+            violations.append("existing human-written content would be removed")
+            break
+
     return violations
 
 
@@ -118,10 +188,10 @@ def _dedupe_strings(values: list[Any]) -> list[str]:
     deduped: list[str] = []
     seen: set[str] = set()
     for value in values:
-        text = sanitize_single_line(str(value or ""))
+        text = " ".join(sanitize_single_line(str(value or "")).split())
         if _is_placeholder(text):
             continue
-        key = text.upper()
+        key = text if _URL_RE.fullmatch(text) else text.upper()
         if key not in seen:
             deduped.append(text)
             seen.add(key)
@@ -134,16 +204,18 @@ def _value_missing(haystack: str, needle: str) -> bool:
         return False
 
     wanted_upper = wanted.upper()
-    if wanted_upper.startswith("CVE-"):
-        return wanted_upper not in {cve.upper() for cve in extract_cves(haystack)}
-
-    if _URL_RE.fullmatch(wanted):
-        return wanted.casefold() not in {
-            url.casefold() for url in _extract_urls(haystack)
+    if _IDENTIFIER_RE.fullmatch(wanted):
+        return wanted_upper not in {
+            match.group().upper() for match in _IDENTIFIER_RE.finditer(haystack)
         }
 
+    if _URL_RE.fullmatch(wanted):
+        return wanted not in _extract_urls(haystack)
+
     existing_tokens = {
-        token.casefold() for token in re.split(r"[\n,;]+", haystack) if token.strip()
+        " ".join(token.split()).casefold()
+        for token in re.split(r"[\n,;]+", haystack)
+        if token.strip()
     }
     return wanted.casefold() not in existing_tokens
 

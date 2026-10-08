@@ -13,6 +13,7 @@ from .console import ProgressLogger
 from .debug import DebugLogger
 from .discovery import DiscoveryWorkflow
 from .env import load_dotenv
+from .feedback import load_feedback_fixture, load_review_feedback
 from .io_utils import load_structured_file, write_json_file
 from .issues import GitHubIssueClient, load_issue_fixture
 from .models import (
@@ -30,6 +31,7 @@ from .prompt_cache import PromptCache
 from .reporting import (
     render_cleanup_markdown,
     render_discovery_markdown,
+    summarize_discovery,
     write_document,
     write_markdown,
 )
@@ -50,7 +52,7 @@ from .rules import (
     validate_discovery_document,
     validate_repo_name,
 )
-from .sbom import fetch_flatcar_production_sbom, load_sbom_fixture
+from .sbom import SBOMIndex, fetch_flatcar_production_sbom, load_sbom_fixture
 from .sources import fetch_live_sources, load_source_fixture
 from .time_utils import default_processing_window, iso_now
 
@@ -102,7 +104,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--issues-fixture", help="JSON/YAML fixture containing GitHub issues"
     )
     discovery.add_argument(
-        "--sbom-fixture", help="SPDX JSON fixture for the Stable production SBOM"
+        "--sbom-fixture", help="SPDX JSON fixture for the released production SBOM"
+    )
+    discovery.add_argument(
+        "--sdk-sbom-fixture",
+        help="Maintainer-supplied SDK SPDX snapshot for discovery scope evidence only",
+    )
+    discovery.add_argument(
+        "--sysext-sbom-fixture",
+        action="append",
+        default=[],
+        help="Maintainer-supplied sysext SPDX snapshot (repeatable; discovery only)",
     )
     discovery.add_argument(
         "--window-start", help="Processing window start ISO timestamp"
@@ -136,6 +148,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--rustsec-cache-dir",
         help="Directory to cache fetched RustSec advisory Markdown between runs",
     )
+    feedback = discovery.add_mutually_exclusive_group()
+    feedback.add_argument(
+        "--feedback-review-repo",
+        help="Read confirmed feedback from review apply summaries in this repository",
+    )
+    feedback.add_argument(
+        "--feedback-fixture",
+        help="Offline replay of confirmed reviewer feedback (JSON/YAML)",
+    )
 
     cleanup = subparsers.add_parser(
         "cleanup", help="Run advisory cleanup recommendation"
@@ -149,7 +170,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--issues-fixture", help="JSON/YAML fixture containing GitHub issues"
     )
     cleanup.add_argument(
-        "--sbom-fixture", help="SPDX JSON fixture for the Stable production SBOM"
+        "--sbom-fixture",
+        help="SPDX JSON fixture for the released Alpha production SBOM",
     )
 
     _add_review_parser(subparsers)
@@ -234,6 +256,29 @@ def _add_review_context_args(parser: argparse.ArgumentParser) -> None:
             "Soft per-part issue body size budget before splitting into "
             f"additional parts (default: {DEFAULT_MAX_PART_BODY_CHARS})"
         ),
+    )
+    parser.add_argument(
+        "--review-detail",
+        choices=["compact", "full"],
+        default="compact",
+        help="Compact summarizes non-actionable findings; full shows individual groups",
+    )
+    parser.add_argument(
+        "--go-review",
+        choices=["include", "defer"],
+        default="include",
+        help="Include or defer Go database findings in this review, not collection",
+    )
+    parser.add_argument(
+        "--rust-review",
+        choices=["include", "defer"],
+        default="include",
+        help="Include or defer RustSec findings in this review, not collection",
+    )
+    parser.add_argument(
+        "--enable-feedback",
+        action="store_true",
+        help="Offer separate, explicit reviewer-feedback choices for future runs",
     )
     parser.add_argument(
         "--quiet", action="store_true", help="Suppress progress logging on stderr"
@@ -360,13 +405,27 @@ def run_discovery_command(args: argparse.Namespace) -> int:
     progress.info(f"Processing window: {window_start} to {window_end}")
     progress.info(f"Advisory repository: {advisory_repo}")
     model_client = _model_client(args, debug_logger, progress)
+    feedback: list[dict[str, Any]] = []
+    if args.feedback_fixture:
+        feedback = load_feedback_fixture(
+            args.feedback_fixture, advisory_repository=advisory_repo
+        )
+    elif args.feedback_review_repo:
+        feedback_repo = validate_repo_name(args.feedback_review_repo)
+        progress.info(f"Reading confirmed reviewer feedback from {feedback_repo}")
+        feedback = load_review_feedback(
+            GitHubIssueClient(repo=feedback_repo), advisory_repository=advisory_repo
+        )
+    progress.info(f"Loaded {len(feedback)} confirmed reviewer decision(s)")
+    for warning in getattr(feedback, "coverage", {}).get("warnings", []):
+        progress.info(f"Reviewer feedback warning: {warning}")
     if args.issues_fixture:
         progress.info(f"Loading issue fixture: {args.issues_fixture}")
         issues = load_issue_fixture(args.issues_fixture)
     else:
-        progress.info("Fetching open Flatcar advisory issues from GitHub")
-        issues = GitHubIssueClient(repo=advisory_repo).fetch_open_advisory_issues()
-    progress.info(f"Loaded {len(issues)} open advisory issue(s)")
+        progress.info("Fetching open Flatcar advisory and package-update issues")
+        issues = GitHubIssueClient(repo=advisory_repo).fetch_open_update_issues()
+    progress.info(f"Loaded {len(issues)} open advisory/package-update issue(s)")
     if args.sbom_fixture:
         progress.info(f"Loading SBOM fixture: {args.sbom_fixture}")
         sbom_index = load_sbom_fixture(args.sbom_fixture)
@@ -402,9 +461,12 @@ def run_discovery_command(args: argparse.Namespace) -> int:
         debug_logger,
         progress,
         target_repo=advisory_repo,
+        feedback=feedback,
+        scope_sboms=_load_discovery_scope_sboms(args),
     )
     document = workflow.run(entries, window_start, window_end)
     document["errors"].extend(source_errors)
+    document["summary"] = summarize_discovery(document)
     progress.info(f"Writing machine-readable output: {args.output}")
     write_document(args.output, document, _output_format(args))
     if args.markdown_output:
@@ -415,6 +477,22 @@ def run_discovery_command(args: argparse.Namespace) -> int:
     if args.markdown_output:
         print(f"wrote {args.markdown_output}")
     return 0
+
+
+def _load_discovery_scope_sboms(
+    args: argparse.Namespace,
+) -> list[tuple[str, SBOMIndex]]:
+    scope_sboms: list[tuple[str, SBOMIndex]] = []
+    snapshots = [("sdk_only", path) for path in [args.sdk_sbom_fixture] if path] + [
+        ("sysext", path) for path in args.sysext_sbom_fixture
+    ]
+    for scope, path in snapshots:
+        index = load_sbom_fixture(path)
+        if not str(index.metadata.get("spdxVersion") or "").startswith("SPDX-"):
+            raise ValueError(f"Scope snapshot {path} must declare its SPDX version")
+        index.metadata["source_url"] = Path(path).resolve().as_uri()
+        scope_sboms.append((scope, index))
+    return scope_sboms
 
 
 def run_cleanup_command(args: argparse.Namespace) -> int:
@@ -482,7 +560,7 @@ def run_review_create_command(args: argparse.Namespace) -> int:
     context = _build_review_context(args, advisory_repo, review_repo)
     batch = build_review_batch(context, discovery_document, cleanup_document)
 
-    if not batch.groups:
+    if not batch.parts:
         progress.info(
             "No decision groups were produced by the supplied documents; "
             "skipping review issue creation"
@@ -511,6 +589,18 @@ def run_review_create_command(args: argparse.Namespace) -> int:
         {
             "batch_id": batch.batch_id,
             "created": True,
+            "review_detail": context.review_detail,
+            "decision_groups": sum(
+                group.source != "feedback" for group in batch.groups
+            ),
+            "feedback_groups": sum(
+                group.source == "feedback" for group in batch.groups
+            ),
+            "omissions": batch.omissions,
+            "source_presentation": {
+                "go_vulndb": args.go_review,
+                "rustsec": args.rust_review,
+            },
             "parts": [
                 {
                     "part_id": result.part_id,
@@ -851,6 +941,10 @@ def _build_review_context(
         discovery_report_url=args.discovery_report_url,
         cleanup_report_url=args.cleanup_report_url,
         max_part_body_chars=args.max_part_body_chars,
+        review_detail=args.review_detail,
+        include_go=args.go_review == "include",
+        include_rust=args.rust_review == "include",
+        enable_feedback=args.enable_feedback,
     )
 
 

@@ -3,7 +3,7 @@
 This repository contains a Flatcar-specific advisory assistant for two workflows:
 
 - new vulnerability discovery from upstream security sources
-- cleanup recommendations for open Flatcar advisory issues using the current Stable production SBOM
+- cleanup recommendations for open Flatcar advisory issues using the current released Alpha production SBOM
 
 It is intentionally conservative. The default mode is read-only, produces machine-readable JSON/YAML, and sends uncertain cases to `needs_manual_review`.
 
@@ -279,6 +279,36 @@ security-triage review create \
 
 Each review issue contains, per decision group: package/component, CVEs, CVSS, SBOM/existing-issue evidence, the recommendation and rationale, the exact proposed issue title/body or comment, and one or more checkboxes carrying a hidden machine-readable action ID. A single unchecked box means no action. A decision group with more than one checked box fails closed (conflict, skipped, reported). The full manifest needed to apply the batch is embedded, base64-encoded, in a hidden HTML comment; a SHA-256 digest inside it detects accidental corruption.
 
+### Review volume and coverage
+
+`review create` and `review render` default to `--review-detail compact`. Non-actionable decisions are summarized rather than presented as individual approval groups; uncertain findings remain visible. Use `--review-detail full` for an audit. Neither mode discards the full discovery JSON or Markdown report.
+
+`--go-review defer` and `--rust-review defer` defer findings from the Go vulnerability database and RustSec respectively **in this review only**. Collection and artifacts remain complete, and Gentoo/oss-security findings about Go or Rust are not excluded. Both sources are included by default. The scheduled workflow accepts repository variables `SECURITY_TRIAGE_GO_REVIEW` and `SECURITY_TRIAGE_RUST_REVIEW`, each `include` (default) or `defer`. Deferred coverage is not evidence that those packages are safe.
+
+For a staged rollout, scheduled runs first render a compact **read-only shadow**, including feedback choices, under `reports/review-shadow` in the report artifact, while publishing full reviews without extra feedback controls by default. Compare the shadow against the complete discovery report, especially relevant/manual findings and deferred sources; then set `SECURITY_TRIAGE_REVIEW_DETAIL=compact` to opt scheduled reviews and feedback controls in. Set it back to `full` to revert presentation without losing evidence or feedback history.
+
+Cleanup remains a separate, explicitly invoked workflow; it is not added to scheduled discovery reviews. Its released-production-SBOM evidence cannot establish SDK/sysext remediation or be replaced by main-branch progress.
+
+### Scope and evidence
+
+Discovery retains ecosystem/namespace identity rather than treating a crate, a Go module, and a similarly named system package as interchangeable. Substring matches are candidates, not shipping evidence. Missing production entries do not establish absence from SDKs or extensions.
+
+Generated issues retain qualified identities in a bounded `Note: Canonical package identity: ...` within `Summary`, preserving the official field order and `update: <package>` title. Conflicting identity notes or ambiguous foreign-ecosystem context in legacy bare-name issues require manual clarification. Approved updates can add missing official fields to title-only/prose issues without removing human text.
+
+For those scopes, maintainers can supply current, authoritative SPDX snapshots with discovery's `--sdk-sbom-fixture` and repeatable `--sysext-sbom-fixture`. Supplying these flags declares the snapshot's scope; use actual Flatcar artifacts, not guessed inventories. Each snapshot is matched against the finding's package identity; ambiguous matches do not establish scope. Package/version evidence, snapshot paths, and digests are recorded. These inputs are not accepted by cleanup, and are not downloaded or refreshed automatically.
+
+Unknown scope, affectedness, or source claims remain explicit review questions. Concrete update targets require source fixed-version evidence; placeholder text such as “update target” is not a remediation requirement. These deterministic checks constrain model confidence rather than treating model agreement as proof.
+
+### Explicit reviewer feedback
+
+`review create --enable-feedback` (also supported by `review render`) offers separate feedback choices: wrong package, not shipped in the assessed scope, already addressed, deferred, track despite uncertainty, or revoke a previous decision. Select at most one feedback choice for a finding and close the review as **Completed**. Selecting feedback does not authorize an advisory mutation; selecting neither is not a rejection. Conflicting feedback/action selections are skipped.
+
+Discovery's opt-in `--feedback-review-repo <owner/repo>` reuses confirmed feedback from GitHub Actions bot-authored review execution summaries. The scheduled workflow supplies its own repository. It validates repository, manifest, selected-action and result correlations; ordinary comments, arbitrary bot identities, unchecked boxes, and a closed/applied label alone are not feedback. Local user-authored comments are not automatically trusted. `--feedback-fixture` supports offline replay of issue/comment API envelopes through the same checks.
+
+Wrong-package/not-shipped/already-addressed/deferred decisions suppress only the same finding and meaningful evidence snapshot, not an entire package ecosystem. Changed CVEs, package/version/scope evidence, affected ranges or substantive source facts require fresh review. Known housekeeping/timestamp changes do not. Raw findings and the feedback's provenance remain in the reports. Use a full review with feedback enabled to explicitly revoke a decision; simply reopening an applied review never authorizes new mutations.
+
+`track_uncertain` keeps the finding visible in compact reviews without authorizing an advisory mutation. Retrying unchanged feedback preserves its original receipt rather than overriding a later revocation.
+
 ### 3. Apply on close
 
 `security-triage review apply` re-fetches the review issue fresh (never trusts a webhook payload) and applies only checked, conflict-free, schema-valid actions when the issue's close reason is exactly `completed`:
@@ -298,9 +328,10 @@ Closing as **Not planned** (or any reason other than `completed`) makes zero Git
 
 ### GitHub Actions
 
-- `.github/workflows/security-triage.yml` runs discovery/cleanup daily (`06:00 UTC`) with Microsoft Foundry via GitHub OIDC, then calls `review create`. See `docs/github-actions-foundry-oidc.md` for the one-time Azure setup (Portal and CLI paths, troubleshooting, and why no client secret is needed).
+- `.github/workflows/security-triage.yml` runs discovery on Monday and Thursday (`06:00 UTC`) with Microsoft Foundry via GitHub OIDC, then calls `review create`. See `docs/github-actions-foundry-oidc.md` for the one-time Azure setup (Portal and CLI paths, troubleshooting, and why no client secret is needed).
 - `.github/workflows/security-triage-apply.yml` triggers only on `issues: closed` (plus a manual `workflow_dispatch` resume input) and calls `review apply`. It never calls Foundry, Azure, or reruns analysis.
 - Both workflows pin `SECURITY_TRIAGE_ADVISORY_REPO`/`SECURITY_TRIAGE_REVIEW_REPO` (or the equivalent `--advisory-repo`/`--review-repo` arguments) to `${{ github.repository }}` for battle testing in this repository.
+- Apply runs are serialized across the repository, not just within one review issue, so separate parts cannot race to create the same advisory. GitHub may replace an older **pending** run when several issues close together; use the apply workflow's `workflow_dispatch` issue-number input to resume a cancelled/pending approval. Active apply runs are never cancelled. Concurrent standalone CLI invocations require equivalent external serialization.
 
 ## Outputs
 
@@ -312,6 +343,7 @@ Discovery JSON root fields include:
 - `model`
 - `records`
 - `errors`
+- `summary` (CLI output): record/source/recommendation counts, confirmed-feedback suppressions, and errors. These are not approval, rejection, or model-precision statistics.
 
 Cleanup JSON root fields include:
 
@@ -364,6 +396,6 @@ GitHub Actions workflows live in `.github/workflows/`:
 - `lint.yml`: ruff check, ruff format check, and mypy on push and pull request.
 - `tests.yml`: pytest across Python 3.12, 3.13, and 3.14 on Ubuntu, macOS, and Windows.
 - `install.yml`: builds the wheel and installs it into an isolated `uv venv` on all three OSes and Python versions, then verifies the `security-triage` entry point.
-- `security-triage.yml`: the guarded discovery and cleanup pipeline itself.
+- `security-triage.yml`: discovery and human-gated review creation.
 - `release.yml`: semantic-release driven versioning, changelog, and GitHub Releases from `main`. Configuration lives in `release.config.js`.
 - `publish.yml`: PyPI publishing template (disabled by default; uncomment when ready to publish).

@@ -6,10 +6,13 @@ from typing import Any
 
 from .console import NullProgressLogger, ProgressLogger
 from .debug import DebugLogger
+from .feedback import annotate_review_feedback, meaningful_text
 from .issue_updates import (
     append_field_values,
+    ensure_issue_fields,
     removal_guard_violations,
     set_field_if_placeholder,
+    with_package_identity,
 )
 from .issues import find_existing_issue_matches
 from .models import BaseModelClient
@@ -18,6 +21,7 @@ from .records import Issue, SourceEntry
 from .rules import (
     SCHEMA_VERSION,
     TARGET_REPO,
+    active_markdown_text,
     apply_discovery_guardrails,
     coerce_discovery_decision,
     coerce_extraction,
@@ -26,9 +30,12 @@ from .rules import (
     is_gentoo_reference,
     issue_labels,
     neutralize_mentions,
+    package_identities_match,
     render_issue_body,
     sanitize_single_line,
+    source_fixed_version_evidence,
     validate_discovery_document,
+    validate_extraction_evidence,
     validate_repo_name,
 )
 from .sbom import SBOMIndex
@@ -44,6 +51,8 @@ class DiscoveryWorkflow:
         debug_logger: DebugLogger | None = None,
         progress_logger: ProgressLogger | None = None,
         target_repo: str = TARGET_REPO,
+        feedback: list[dict[str, Any]] | None = None,
+        scope_sboms: list[tuple[str, SBOMIndex]] | None = None,
     ) -> None:
         self.model_client = model_client
         self.sbom_index = sbom_index
@@ -51,6 +60,10 @@ class DiscoveryWorkflow:
         self.debug_logger = debug_logger or DebugLogger()
         self.progress_logger = progress_logger or NullProgressLogger()
         self.target_repo = validate_repo_name(target_repo)
+        self.feedback = feedback if feedback is not None else []
+        self.scope_sboms = list(scope_sboms or [])
+        if any(scope not in {"sdk_only", "sysext"} for scope, _ in self.scope_sboms):
+            raise ValueError("Discovery scope SBOMs support only sdk_only and sysext")
 
     def run(
         self, entries: list[SourceEntry], window_start: str, window_end: str
@@ -83,6 +96,13 @@ class DiscoveryWorkflow:
                     {"record_id": record_id, "source": entry.source, "error": str(exc)}
                 )
                 record = self._manual_record(record_id, entry, str(exc))
+            extraction = record.get("llm_extraction") or {}
+            record["scope_evidence"] = self._scope_evidence(extraction)
+            record["sbom_snapshot_id"] = self.sbom_index.metadata.get("snapshot_sha256")
+            annotate_review_feedback(
+                record, self.feedback, advisory_repository=self.target_repo
+            )
+            record["next_steps"] = _next_steps(record)
             records.append(record)
             decision = record.get("decision", {})
             package_name = (
@@ -107,19 +127,35 @@ class DiscoveryWorkflow:
             },
             "sources": _sources_summary(entries),
             "model": self.model_client.metadata(),
+            "sbom_metadata": self.sbom_index.metadata,
+            "feedback_coverage": getattr(self.feedback, "coverage", None),
             "records": records,
             "errors": errors,
         }
         validate_discovery_document(document)
         return document
 
+    def _scope_evidence(self, extraction: dict[str, Any]) -> list[dict[str, Any]]:
+        identity = extraction.get("package_identity") or extraction.get("package_name")
+        evidence = self.sbom_index.scope_evidence(identity)
+        for scope, index in self.scope_sboms:
+            for item in index.discovery_scope_evidence(identity, scope):
+                if item not in evidence:
+                    evidence.append(item)
+        return evidence
+
     def _process_entry(self, record_id: str, entry: SourceEntry) -> dict[str, Any]:
         self.progress_logger.info(f"Extracting advisory fields for {entry.entry_id}")
-        extraction = coerce_extraction(self.model_client.extract_advisory(entry))
+        extraction = validate_extraction_evidence(
+            self.model_client.extract_advisory(entry), entry
+        )
         self.progress_logger.info(
             f"Extracted package {extraction.get('package_name') or 'unknown'} with {len(extraction.get('cves') or [])} CVE(s)"
         )
-        sbom_matches = self.sbom_index.match_package(extraction.get("package_name"))
+        sbom_matches = self.sbom_index.match_package(
+            extraction.get("package_identity") or extraction.get("package_name")
+        )
+        scope_evidence = self._scope_evidence(extraction)
         self.progress_logger.info(f"Found {len(sbom_matches)} SBOM package match(es)")
         existing_issue_matches = find_existing_issue_matches(extraction, self.issues)
         self.progress_logger.info(
@@ -131,7 +167,12 @@ class DiscoveryWorkflow:
         upstream_activity = _upstream_activity(
             entry, extraction, existing_issue_matches
         )
-        if covered_match and not upstream_activity["requires_issue_update"]:
+        if (
+            covered_match
+            and not upstream_activity["requires_issue_update"]
+            and (extraction.get("evidence_validation") or {}).get("status")
+            == "validated"
+        ):
             self.progress_logger.info(
                 f"Existing issue #{covered_match.get('issue')} already covers extracted advisory IDs; skipping relevance model call"
             )
@@ -145,7 +186,13 @@ class DiscoveryWorkflow:
                 upstream_activity,
             )
         evidence_bundle = build_discovery_evidence_bundle(
-            record_id, entry, extraction, sbom_matches, existing_issue_matches
+            record_id,
+            entry,
+            extraction,
+            sbom_matches,
+            existing_issue_matches,
+            scope_evidence=scope_evidence,
+            sbom_metadata=self.sbom_index.metadata,
         )
         self.debug_logger.log(
             "discovery_evidence_bundle", record_id=record_id, bundle=evidence_bundle
@@ -161,17 +208,19 @@ class DiscoveryWorkflow:
             sbom_matches,
             existing_issue_matches,
             entry.title,
+            scope_evidence=scope_evidence,
         )
-        if (
-            upstream_activity["requires_issue_update"]
-            and existing_issue_matches
-            and decision["action"] == "ignore"
+        if decision["action"] == "update_existing_issue" and not _unique_issue_match(
+            extraction, existing_issue_matches
         ):
-            relevance = {**relevance, "status": "relevant"}
+            manual_review_reasons.append(
+                "No unique same-package open issue can safely receive this update."
+            )
+            relevance = {**relevance, "status": "needs_manual_review"}
             decision = {
-                "action": "update_existing_issue",
-                "confidence": "medium",
-                "reason": "Gentoo Bugzilla changed for an already tracked advisory; recommend updating the existing issue.",
+                "action": "needs_manual_review",
+                "confidence": "low",
+                "reason": manual_review_reasons[-1],
             }
         proposed_issue = None
         proposed_update = None
@@ -271,17 +320,22 @@ def _proposed_issue(
     extraction: dict[str, Any], relevance: dict[str, Any]
 ) -> dict[str, Any]:
     package_name = sanitize_single_line(extraction["package_name"])
+    trusted_scopes = [
+        scope
+        for scope in relevance.get("confirmed_scopes") or []
+        if scope in {"sdk_only", "sysext"}
+        and (scope != "sdk_only" or relevance.get("scope") != "production")
+    ]
     labels = issue_labels(
         extraction.get("cvss_scores"),
         relevance.get("scope"),
-        extraction.get("scope_assessment"),
+        " ".join(trusted_scopes),
     )
     gentoo_ref = extraction.get("gentoo_ref")
     if not is_gentoo_reference(gentoo_ref):
         gentoo_ref = None
-    return {
-        "title": f"update: {package_name}",
-        "body": render_issue_body(
+    body = with_package_identity(
+        render_issue_body(
             package_name,
             extraction.get("cves") or [],
             extraction.get("cvss_scores") or [],
@@ -289,6 +343,11 @@ def _proposed_issue(
             extraction.get("summary"),
             gentoo_ref,
         ),
+        extraction.get("package_identity") or extraction.get("package_name"),
+    )
+    return {
+        "title": f"update: {package_name}",
+        "body": body,
         "labels": labels,
         "assignees": [],
         "milestone": None,
@@ -301,11 +360,12 @@ def _proposed_update(
     matches: list[dict[str, Any]],
     upstream_activity: dict[str, Any],
 ) -> dict[str, Any] | None:
-    if not matches:
+    match = _unique_issue_match(extraction, matches)
+    if match is None:
         return None
     cves = extraction.get("cves") or []
     additions: list[str] = []
-    new_cves = _new_cves_for_issue(cves, matches[0])
+    new_cves = _new_cves_for_issue(cves, match)
     if new_cves:
         additions.append(f"Add CVEs: {', '.join(new_cves)}")
     if upstream_activity.get("new_aliases"):
@@ -316,20 +376,20 @@ def _proposed_update(
     if (
         action_needed
         and action_needed != "TBD"
-        and _value_missing_from_issue(action_needed, matches[0])
+        and _value_missing_from_issue(action_needed, match)
     ):
         additions.append(f"Review Action Needed: {action_needed}")
     summary = extraction.get("summary")
-    if summary and summary != "TBD" and _value_missing_from_issue(summary, matches[0]):
+    if summary and summary != "TBD" and _value_missing_from_issue(summary, match):
         additions.append(f"Add upstream context: {summary}")
     additions.extend(upstream_activity.get("recommended_additions") or [])
-    updated_body = _updated_issue_body(entry, extraction, matches[0], upstream_activity)
+    updated_body = _updated_issue_body(entry, extraction, match, upstream_activity)
     comment_body = _upstream_update_comment_body(entry, upstream_activity, additions)
-    body_diff = _body_diff(matches[0].get("body"), updated_body)
+    body_diff = _body_diff(match.get("body"), updated_body)
     return {
-        "issue": matches[0]["issue"],
-        "issue_url": matches[0]["issue_url"],
-        "title": matches[0]["title"],
+        "issue": match["issue"],
+        "issue_url": match["issue_url"],
+        "title": match["title"],
         "update_reason": _update_reason(upstream_activity, new_cves),
         "detected_changes": _detected_changes(upstream_activity, new_cves),
         "recommended_additions": additions,
@@ -337,7 +397,7 @@ def _proposed_update(
         "updated_body": updated_body,
         "updated_body_diff": body_diff,
         "comment_body": comment_body,
-        "matched_existing_issue": matches[0],
+        "matched_existing_issue": match,
     }
 
 
@@ -351,7 +411,8 @@ def _already_covered_by_existing_issue(
     }
     if not extracted_ids:
         return None
-    for match in matches:
+    match = _unique_issue_match(extraction, matches)
+    if match:
         issue_ids = {
             str(item).strip().upper()
             for item in match.get("cves") or []
@@ -360,6 +421,56 @@ def _already_covered_by_existing_issue(
         if extracted_ids and extracted_ids.issubset(issue_ids):
             return match
     return None
+
+
+def _unique_issue_match(
+    extraction: dict[str, Any], matches: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    package = extraction.get("package_identity") or extraction.get("package_name")
+    same_package = [
+        match
+        for match in matches
+        if package
+        and package_identities_match(
+            package,
+            str(
+                (match.get("parsed_issue") or {}).get("package_identity")
+                or match.get("package")
+                or (match.get("parsed_issue") or {}).get("name")
+                or ""
+            ),
+        )
+        and match.get("state", "open") == "open"
+    ]
+    return same_package[0] if len(same_package) == 1 else None
+
+
+def _next_steps(record: dict[str, Any]) -> list[str]:
+    suppression = record.get("review_suppression") or {}
+    if suppression.get("suppressed"):
+        return [
+            "No advisory mutation: the reviewer decision applies only to this unchanged evidence snapshot.",
+            "Use an explicit full review to revoke or refresh this decision; changed evidence resurfaces automatically.",
+        ]
+    action = (record.get("decision") or {}).get("action")
+    if action == "needs_manual_review":
+        return [
+            "Verify the exact upstream package identity and affected CVEs against the original source.",
+            "Confirm production, SDK, or sysext scope and any required USE flags with package evidence.",
+            "Resolve fixed-version and existing-issue ambiguity before approving an advisory mutation.",
+        ]
+    if action in {"create_issue", "update_existing_issue"}:
+        return [
+            "Review the source evidence, package identity, scope, and proposed additive changes.",
+            "Approve the intended mutation in a review issue; feedback checkboxes are independent.",
+        ]
+    if action == "kernel_regular_update_flow":
+        return [
+            "Follow regular stable Kernel releases; do not create a normal advisory issue."
+        ]
+    return [
+        "No advisory mutation recommended; inspect the retained evidence if this finding needs reconsideration."
+    ]
 
 
 def _already_tracked_record(
@@ -413,6 +524,8 @@ def _source_detail_fields(
     entry: SourceEntry, upstream_activity: dict[str, Any]
 ) -> dict[str, Any]:
     return {
+        "source_title": entry.title,
+        "source_content": entry.content,
         "upstream_metadata": entry.metadata,
         "upstream_description": entry.description,
         "upstream_comments": entry.comments,
@@ -434,12 +547,12 @@ def _empty_upstream_activity() -> dict[str, Any]:
 def _upstream_activity(
     entry: SourceEntry, extraction: dict[str, Any], matches: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    if not matches:
+    match = _unique_issue_match(extraction, matches)
+    if match is None:
         activity = _empty_upstream_activity()
         activity["new_comments"] = entry.new_comments
         return activity
 
-    match = matches[0]
     existing_body = str(match.get("body") or "")
     existing_cves = {str(cve).upper() for cve in match.get("cves") or []}
     aliases = [
@@ -454,8 +567,14 @@ def _upstream_activity(
     ]
     recommended_additions: list[str] = []
 
-    severity = entry.metadata.get("severity")
-    if severity and str(severity) not in existing_body:
+    severity = str(entry.metadata.get("severity") or "").strip()
+    new_severity = (
+        severity
+        if severity.casefold() not in {"", "normal", "unspecified"}
+        and severity.casefold() not in existing_body.casefold()
+        else None
+    )
+    if new_severity:
         source = entry.metadata.get("url")
         source_text = f" (source: {source})" if source else ""
         recommended_additions.append(f"Review Gentoo severity: {severity}{source_text}")
@@ -463,23 +582,61 @@ def _upstream_activity(
         recommended_additions.append(
             f"Review upstream references: {', '.join(new_references[:5])}"
         )
-    if entry.description and _compact(entry.description) not in _compact(existing_body):
-        recommended_additions.append(
-            f"Review Bugzilla description: {_truncate(neutralize_mentions(entry.description), 300)}"
-        )
-    for comment in entry.new_comments:
+    new_comments = [
+        comment
+        for comment in entry.new_comments
+        if meaningful_text(comment.get("text"))
+        and _compact(meaningful_text(comment.get("text")))
+        not in _compact(existing_body)
+    ]
+    for comment in new_comments:
         recommended_additions.append(_comment_addition(comment))
 
     extracted_new_cves = _new_cves_for_issue(extraction.get("cves") or [], match)
+    known_fixes = {
+        version
+        for evidence in source_fixed_version_evidence(
+            active_markdown_text(existing_body)
+        )
+        for version in evidence["versions"]
+    }
+    fixed_versions = [
+        str(version)
+        for version in extraction.get("fixed_versions") or []
+        if str(version) not in known_fixes
+    ]
+    parsed_scores = (match.get("parsed_issue") or {}).get("cvss_scores") or []
+    new_scores = [
+        score
+        for score in extraction.get("cvss_scores") or []
+        if str(score) not in {str(value) for value in parsed_scores}
+    ]
+    if fixed_versions:
+        recommended_additions.append(
+            f"Review newly reported fixed versions: {', '.join(fixed_versions)}"
+        )
+    if new_scores:
+        recommended_additions.append(
+            f"Review newly reported CVSS scores: {', '.join(map(str, new_scores))}"
+        )
     requires_issue_update = bool(
-        new_aliases or extracted_new_cves or recommended_additions
+        new_aliases
+        or extracted_new_cves
+        or new_references
+        or new_comments
+        or fixed_versions
+        or new_scores
+        or new_severity
     )
     return {
         "requires_issue_update": requires_issue_update,
         "new_aliases": new_aliases,
         "new_references": new_references,
-        "new_comments": entry.new_comments,
+        "new_comments": new_comments,
+        "new_fixed_versions": fixed_versions,
+        "new_cvss_scores": new_scores,
         "severity": severity,
+        "new_severity": new_severity,
         "severity_source_url": entry.metadata.get("url"),
         "recommended_additions": recommended_additions,
     }
@@ -540,7 +697,7 @@ def _detected_changes(
                 "reason": "Bugzilla URL, see_also, or source references are missing from the matched issue.",
             }
         )
-    if upstream_activity.get("severity"):
+    if upstream_activity.get("new_severity"):
         changes.append(
             {
                 "kind": "bugzilla_severity",
@@ -596,29 +753,7 @@ def _updated_issue_body(
     )
     if not package_name:
         return None
-    if not existing_body.strip():
-        cves = _dedupe_strings(
-            [
-                *(parsed.get("cves") or []),
-                *(extraction.get("cves") or []),
-                *(upstream_activity.get("new_aliases") or []),
-            ],
-            upper=True,
-        )
-        cvss_scores = _dedupe_strings(
-            [*(parsed.get("cvss_scores") or []), *(extraction.get("cvss_scores") or [])]
-        )
-        updated = render_issue_body(
-            package_name,
-            cves,
-            cvss_scores,
-            extraction.get("action_needed"),
-            extraction.get("summary"),
-            extraction.get("gentoo_ref"),
-        )
-        return updated
-
-    updated = existing_body
+    updated = ensure_issue_fields(existing_body, package_name)
     updated = append_field_values(
         updated,
         "CVEs",

@@ -14,7 +14,7 @@ This module implements the two-stage, human-gated process described in
    through ``GitHubActionRunner``.
 
 GitHub task lists are an approval *interface*, not executable prose: only
-action IDs that exist verbatim in the signed-for manifest ever reach a mutating
+action IDs that exist verbatim in the validated manifest ever reach a mutating
 API call, and every mutation is re-validated against freshly fetched GitHub
 state before it is applied.
 """
@@ -34,8 +34,29 @@ from typing import Any
 from .actions import GitHubActionRunner
 from .console import NullProgressLogger, ProgressLogger
 from .debug import DebugLogger
-from .issue_updates import append_field_values, set_field_if_placeholder
-from .issues import GitHubIssueClient, find_existing_issue_matches, parse_issue_body
+from .feedback import (
+    FEEDBACK_DECISIONS,
+    FEEDBACK_KIND,
+    build_feedback_payload,
+    is_trusted_feedback_author,
+    parse_feedback_summary,
+    render_feedback_summary,
+    validate_feedback_payload,
+)
+from .issue_updates import (
+    append_field_values,
+    ensure_issue_fields,
+    set_field_if_placeholder,
+    with_package_identity,
+)
+from .issues import (
+    GitHubIssueClient,
+    find_existing_issue_matches,
+    is_package_update_issue,
+    issue_from_api,
+    issue_package_from_title,
+    parse_issue_body,
+)
 from .records import Issue, ParsedIssue
 from .rules import (
     REVIEW_APPLIED_LABEL,
@@ -44,7 +65,7 @@ from .rules import (
     is_gentoo_reference,
     issue_labels,
     neutralize_mentions,
-    normalize_name,
+    package_identities_match,
     render_issue_body,
     sanitize_single_line,
     severity_label,
@@ -53,6 +74,7 @@ from .rules import (
 )
 
 REVIEW_SCHEMA_VERSION = "1.0"
+REVIEW_FEEDBACK_LABEL = "security-triage/review-feedback"
 
 #: Conservative ceiling for a single issue/part body, kept well below GitHub's
 #: real ~65536 character issue-body limit so encoding overhead never trips it.
@@ -91,7 +113,7 @@ CLEANUP_ACTION_KINDS = {
     CLEANUP_KIND_KEEP_OPEN,
     CLEANUP_KIND_MANUAL,
 }
-ALL_ACTION_KINDS = DISCOVERY_ACTION_KINDS | CLEANUP_ACTION_KINDS
+ALL_ACTION_KINDS = DISCOVERY_ACTION_KINDS | CLEANUP_ACTION_KINDS | {FEEDBACK_KIND}
 
 #: Action kinds that never call a mutating GitHub API. Selecting one of these
 #: only records an explicit human acknowledgement in the execution summary.
@@ -101,6 +123,7 @@ NON_MUTATING_KINDS = {
     DISCOVERY_KIND_MANUAL,
     CLEANUP_KIND_KEEP_OPEN,
     CLEANUP_KIND_MANUAL,
+    FEEDBACK_KIND,
 }
 
 _DRY_RUN_BODY_MARKER = "<!-- security-triage:dry-run-body-start -->"
@@ -146,10 +169,16 @@ class ReviewContext:
     discovery_report_url: str | None = None
     cleanup_report_url: str | None = None
     max_part_body_chars: int = DEFAULT_MAX_PART_BODY_CHARS
+    review_detail: str = "full"
+    include_go: bool = True
+    include_rust: bool = True
+    enable_feedback: bool = False
 
     def __post_init__(self) -> None:
         self.advisory_repo = validate_repo_name(self.advisory_repo)
         self.review_repo = validate_repo_name(self.review_repo)
+        if self.review_detail not in {"compact", "full"}:
+            raise ReviewConfigError("review_detail must be 'compact' or 'full'")
         if not _RUN_ID_RE.match(self.run_id or ""):
             raise ReviewConfigError(
                 f"Invalid run id {self.run_id!r}; expected 1-128 characters "
@@ -204,6 +233,7 @@ class ReviewBatch:
     batch_id: str
     parts: list[ReviewPart]
     groups: list[DecisionGroup]
+    omissions: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -340,6 +370,10 @@ _MARKER_BLOCK_RE = re.compile(
 _MANIFEST_BLOCK_RE = re.compile(
     r"<!--\s*security-triage:review-manifest:v1\s*(?P<body>.*?)-->", re.DOTALL
 )
+_FEEDBACK_SUMMARY_BLOCK_RE = re.compile(
+    r"<!--\s*security-triage:review-feedback:v1\s+[A-Za-z0-9+/=\s]+?-->",
+    re.DOTALL,
+)
 _ACTION_LINE_RE = re.compile(
     r"^\s*[-*]\s+\[(?P<mark>[ xX])\]\s+.*<!--\s*security-triage:action-id:"
     r"(?P<action_id>[A-Za-z0-9._-]+)\s*-->\s*$"
@@ -375,8 +409,68 @@ def find_batch_part_marker(body: str) -> tuple[str, str] | None:
     return batch_id, part_id
 
 
+def _manifest_for_storage(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Store each feedback evidence snapshot once, addressed by its SHA256."""
+    snapshots: dict[str, Any] = {}
+    groups = []
+    for group in manifest.get("groups", []):
+        actions = []
+        for action in group.get("actions", []):
+            payload = action.get("payload") or {}
+            snapshot = payload.get("evidence_snapshot")
+            if action.get("kind") == FEEDBACK_KIND and isinstance(snapshot, dict):
+                key = compute_digest(snapshot)
+                snapshots[key] = snapshot
+                payload = {
+                    key: value
+                    for key, value in payload.items()
+                    if key != "evidence_snapshot"
+                }
+                payload["evidence_snapshot_ref"] = key
+                action = {**action, "payload": payload}
+            actions.append(action)
+        groups.append({**group, "actions": actions})
+    if not snapshots:
+        return manifest
+    return {**manifest, "groups": groups, "feedback_snapshots": snapshots}
+
+
+def _expand_feedback_snapshots(manifest: dict[str, Any]) -> dict[str, Any]:
+    if "feedback_snapshots" not in manifest:
+        return manifest
+    snapshots = manifest.pop("feedback_snapshots")
+    if not isinstance(snapshots, dict) or any(
+        not isinstance(snapshot, dict) or compute_digest(snapshot) != key
+        for key, snapshot in snapshots.items()
+    ):
+        raise ManifestCorruptionError("Invalid feedback evidence snapshot table")
+    referenced: set[str] = set()
+    try:
+        for group in manifest["groups"]:
+            for action in group["actions"]:
+                payload = action.get("payload") or {}
+                if "evidence_snapshot_ref" not in payload:
+                    continue
+                key = payload.pop("evidence_snapshot_ref")
+                if (
+                    action.get("kind") != FEEDBACK_KIND
+                    or "evidence_snapshot" in payload
+                    or key not in snapshots
+                ):
+                    raise ManifestCorruptionError("Invalid feedback evidence reference")
+                payload["evidence_snapshot"] = snapshots[key]
+                referenced.add(key)
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise ManifestCorruptionError("Malformed feedback snapshot references") from exc
+    if referenced != set(snapshots):
+        raise ManifestCorruptionError("Unreferenced feedback evidence snapshots")
+    return manifest
+
+
 def embed_manifest(manifest: dict[str, Any]) -> str:
-    encoded = base64.b64encode(canonical_json(manifest).encode("utf-8")).decode("ascii")
+    encoded = base64.b64encode(
+        canonical_json(_manifest_for_storage(manifest)).encode("utf-8")
+    ).decode("ascii")
     wrapped = "\n".join(textwrap.wrap(encoded, 200)) if encoded else ""
     return f"<!-- security-triage:review-manifest:v1\n{wrapped}\n-->"
 
@@ -424,6 +518,7 @@ def extract_manifest(body: str) -> dict[str, Any]:
         ) from exc
     if not isinstance(manifest, dict):
         raise ManifestCorruptionError("Review manifest must be a JSON object")
+    manifest = _expand_feedback_snapshots(manifest)
     digest = manifest.get("digest")
     without_digest = {key: value for key, value in manifest.items() if key != "digest"}
     if digest != compute_digest(without_digest):
@@ -486,6 +581,7 @@ def validate_manifest_against_context(
         )
 
     seen_action_ids: set[str] = set()
+    seen_group_ids: set[str] = set()
     for group in manifest.get("groups", []):
         if (
             not isinstance(group, dict)
@@ -495,8 +591,29 @@ def validate_manifest_against_context(
             raise ManifestValidationError(
                 "Review manifest contains a malformed decision group"
             )
+        group_id = group["group_id"]
+        if not isinstance(group_id, str) or group_id in seen_group_ids:
+            raise ManifestValidationError("Duplicate or invalid decision group ID")
+        seen_group_ids.add(group_id)
+        if group.get("source") == "feedback" and not isinstance(
+            group.get("feedback_for_group_id"), str
+        ):
+            raise ManifestValidationError(
+                "Feedback group is missing its related decision group"
+            )
         for action in group["actions"]:
             _validate_manifest_action(action)
+            if (action["kind"] == FEEDBACK_KIND) != (group.get("source") == "feedback"):
+                raise ManifestValidationError(
+                    "Feedback must have its own non-mutating group"
+                )
+            if action["kind"] == FEEDBACK_KIND:
+                try:
+                    validate_feedback_payload(
+                        action["payload"], advisory_repository=actual_advisory
+                    )
+                except ValueError as exc:
+                    raise ManifestValidationError(str(exc)) from exc
             action_id = action["action_id"]
             if action_id in seen_action_ids:
                 raise ManifestValidationError(
@@ -528,17 +645,53 @@ def _validate_manifest_action(action: Any) -> None:
             raise ManifestValidationError(
                 f"Action {action_id!r} payload is missing required create-issue fields"
             )
+        parsed = parse_issue_body(payload["body"])
+        if (
+            not parsed.valid
+            or not package_identities_match(payload.get("package_name"), parsed.name)
+            or not package_identities_match(
+                payload.get("package_identity") or payload.get("package_name"),
+                parsed.identity,
+            )
+            or not package_identities_match(
+                parsed.name, issue_package_from_title(str(payload["title"]))
+            )
+            or not all(isinstance(label, str) for label in payload["labels"])
+            or not {"advisory", "security"}.issubset(payload["labels"])
+        ):
+            raise ManifestValidationError(
+                f"Action {action_id!r} has inconsistent advisory package identity or labels"
+            )
     elif kind == DISCOVERY_KIND_UPDATE:
-        if not isinstance(payload.get("issue"), int):
+        if type(payload.get("issue")) is not int or payload["issue"] <= 0:
             raise ManifestValidationError(
                 f"Action {action_id!r} payload is missing an issue number"
             )
+        additions = payload.get("field_additions", {})
+        if not isinstance(additions, dict) or any(
+            not isinstance(additions.get(key, []), list)
+            or not all(isinstance(value, str) for value in additions.get(key, []))
+            for key in ("cves", "cvss_scores", "gentoo_refs")
+        ):
+            raise ManifestValidationError(
+                f"Action {action_id!r} has malformed additive fields"
+            )
     elif kind in (CLEANUP_KIND_COMMENT_ONLY, CLEANUP_KIND_COMMENT_AND_CLOSE):
-        if not isinstance(payload.get("issue"), int) or not payload.get("comment_body"):
+        if (
+            type(payload.get("issue")) is not int
+            or payload["issue"] <= 0
+            or not isinstance(payload.get("comment_body"), str)
+            or not payload["comment_body"]
+        ):
             raise ManifestValidationError(
                 f"Action {action_id!r} payload is missing an issue number "
                 "or comment body"
             )
+    elif kind == FEEDBACK_KIND:
+        try:
+            validate_feedback_payload(payload)
+        except ValueError as exc:
+            raise ManifestValidationError(str(exc)) from exc
 
 
 # --- Checkbox rendering and parsing ------------------------------------------
@@ -608,6 +761,41 @@ def resolve_review_selections(
                     checked_in_group,
                 )
             )
+    by_group = {resolution.group_id: resolution for resolution in resolutions}
+    feedback_by_key: dict[str, list[GroupResolution]] = {}
+    for group in manifest.get("groups", []):
+        resolution = by_group[group["group_id"]]
+        if group.get("source") == "feedback" and resolution.outcome == "conflict":
+            related = by_group.get(group.get("feedback_for_group_id"))
+            if (
+                related is not None
+                and related.selected_action is not None
+                and related.selected_action.get("kind") not in NON_MUTATING_KINDS
+            ):
+                related.outcome, related.selected_action = "conflict", None
+        action = resolution.selected_action
+        if action is None or action.get("kind") != FEEDBACK_KIND:
+            continue
+        payload = action["payload"]
+        feedback_by_key.setdefault(payload["feedback_key"], []).append(resolution)
+        related = by_group.get(group.get("feedback_for_group_id"))
+        if (
+            related is not None
+            and related.selected_action is not None
+            and related.selected_action.get("kind") not in NON_MUTATING_KINDS
+            and payload["decision"] != "revoke"
+        ):
+            related.outcome = resolution.outcome = "conflict"
+            related.selected_action = resolution.selected_action = None
+    for feedback_resolutions in feedback_by_key.values():
+        decisions = {
+            item.selected_action["payload"]["decision"]
+            for item in feedback_resolutions
+            if item.selected_action is not None
+        }
+        if len(decisions) > 1:
+            for item in feedback_resolutions:
+                item.outcome, item.selected_action = "conflict", None
     return resolutions
 
 
@@ -637,30 +825,203 @@ _CLEANUP_KIND_BY_ACTION = {
 }
 
 
-def build_discovery_groups(document: dict[str, Any] | None) -> list[DecisionGroup]:
+def _unique_records(document: dict[str, Any], source: str) -> list[dict[str, Any]]:
+    records: dict[str, dict[str, Any]] = {}
+    for record in document.get("records", []):
+        identity = str(
+            record.get("record_id" if source == "discovery" else "issue") or ""
+        )
+        key = identity or compute_digest(record)
+        if key in records and canonical_json(records[key]) != canonical_json(record):
+            raise ManifestValidationError(
+                f"Conflicting duplicate {source} record ID: {key}"
+            )
+        records.setdefault(key, record)
+    return list(records.values())
+
+
+def _evidence_bound_group(group: DecisionGroup) -> DecisionGroup:
+    """Version new IDs without changing validation of already-published manifests."""
+    fingerprint = compute_digest(group.record)
+    for candidate in group.candidates:
+        candidate.action_id = (
+            candidate.action_id.split("-", 1)[0]
+            + "-"
+            + _stable_hash(
+                "evidence-v2",
+                candidate.action_id,
+                fingerprint,
+                canonical_json(candidate.payload),
+            )
+        )
+        candidate.evidence_fingerprint = fingerprint
+    return group
+
+
+def _omission_reason(
+    record: dict[str, Any], source: str, context: ReviewContext
+) -> str | None:
+    if source == "discovery":
+        if record.get("source") == "go_vulndb" and not context.include_go:
+            return "source_excluded:go_vulndb"
+        if record.get("source") == "rustsec" and not context.include_rust:
+            return "source_excluded:rustsec"
+    if context.review_detail != "compact":
+        return None
+    if _is_suppressed(record):
+        suppression = record["review_suppression"]
+        decision = (
+            suppression.get("decision") if isinstance(suppression, dict) else None
+        )
+        return "review_suppression:" + (
+            decision if decision in FEEDBACK_DECISIONS else "recorded_feedback"
+        )
+    feedback = record.get("review_suppression") or {}
+    if isinstance(feedback, dict) and feedback.get("decision") == "track_uncertain":
+        return None
+    decision = record.get("decision") or {}
+    confidence = (
+        decision.get("confidence")
+        if source == "discovery"
+        else record.get("confidence")
+    )
+    if record.get("manual_review_reasons") or confidence not in {"high", "medium"}:
+        return None
+    if source == "cleanup" and record.get("recommended_action") == "keep_open":
+        if record.get("status") != "needs_manual_review":
+            return "compact:cleanup_keep_open"
+    activity = record.get("upstream_activity") or {}
+    if (
+        source == "discovery"
+        and not any(
+            activity.get(key)
+            for key in (
+                "requires_issue_update",
+                "new_aliases",
+                "new_references",
+                "new_comments",
+            )
+        )
+        and not record.get("upstream_new_comments")
+    ):
+        if decision.get("action") in {"ignore", "kernel_regular_update_flow"}:
+            return "compact:" + str(decision["action"])
+    return None
+
+
+def _visible_records(
+    document: dict[str, Any],
+    source: str,
+    context: ReviewContext | None,
+    omissions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    visible = []
+    for record in _unique_records(document, source):
+        reason = _omission_reason(record, source, context) if context else None
+        if reason:
+            omissions.append(
+                {
+                    "source": source,
+                    "record_id": str(
+                        record.get("record_id" if source == "discovery" else "issue")
+                        or compute_digest(record)
+                    ),
+                    "reason": reason,
+                    "explanation": (
+                        str(
+                            (record.get("review_suppression") or {}).get("reason") or ""
+                        )
+                        if isinstance(record.get("review_suppression"), dict)
+                        else ""
+                    ),
+                }
+            )
+        else:
+            visible.append(record)
+    return visible
+
+
+def _is_suppressed(record: dict[str, Any]) -> bool:
+    suppression = record.get("review_suppression")
+    if isinstance(suppression, dict):
+        return bool(suppression.get("suppressed", True))
+    return bool(suppression)
+
+
+def build_discovery_groups(
+    document: dict[str, Any] | None,
+    context: ReviewContext | None = None,
+    *,
+    omissions: list[dict[str, Any]] | None = None,
+) -> list[DecisionGroup]:
     if not document:
         return []
     groups: list[DecisionGroup] = []
-    for record in document.get("records", []):
+    for record in _visible_records(
+        document, "discovery", context, omissions if omissions is not None else []
+    ):
         action = (record.get("decision") or {}).get("action")
         if action == "needs_manual_review":
             groups.append(_discovery_manual_group(record))
         else:
             groups.append(_discovery_normal_group(record, action))
-    return groups
+    for group in groups:
+        if _is_suppressed(group.record):
+            group.candidates = []
+    return [_evidence_bound_group(group) for group in groups]
 
 
-def build_cleanup_groups(document: dict[str, Any] | None) -> list[DecisionGroup]:
+def build_cleanup_groups(
+    document: dict[str, Any] | None,
+    context: ReviewContext | None = None,
+    *,
+    omissions: list[dict[str, Any]] | None = None,
+) -> list[DecisionGroup]:
     if not document:
         return []
     groups: list[DecisionGroup] = []
-    for record in document.get("records", []):
+    for record in _visible_records(
+        document, "cleanup", context, omissions if omissions is not None else []
+    ):
         recommended = record.get("recommended_action")
         if recommended == "manual_review":
             groups.append(_cleanup_manual_group(record))
         else:
             groups.append(_cleanup_normal_group(record, recommended))
-    return groups
+    for group in groups:
+        if _is_suppressed(group.record):
+            group.candidates = []
+    return [_evidence_bound_group(group) for group in groups]
+
+
+def _feedback_group(
+    record: dict[str, Any], context: ReviewContext
+) -> DecisionGroup | None:
+    record_id = str(record.get("record_id") or compute_digest(record))
+    group_id = _group_id("feedback", record_id)
+    candidates = []
+    decisions = (
+        ("track_uncertain", "revoke") if _is_suppressed(record) else FEEDBACK_DECISIONS
+    )
+    for decision in decisions:
+        try:
+            payload = build_feedback_payload(
+                record, decision, advisory_repository=context.advisory_repo
+            )
+        except ValueError:
+            return None
+        candidates.append(
+            ActionCandidate(
+                action_id="feedback-"
+                + _stable_hash(group_id, payload["feedback_key"], decision),
+                group_id=group_id,
+                kind=FEEDBACK_KIND,
+                label=f"Record reviewer feedback: {decision.replace('_', ' ')}",
+                payload=payload,
+                evidence_fingerprint=payload["feedback_key"],
+            )
+        )
+    return DecisionGroup(group_id, "feedback", record, candidates)
 
 
 def _dedupe_preserve_order(values: list[Any]) -> list[str]:
@@ -680,12 +1041,44 @@ def _dedupe_preserve_order(values: list[Any]) -> list[str]:
 def _create_payload(record: dict[str, Any]) -> dict[str, Any]:
     proposed = record.get("proposed_issue") or {}
     extraction = record.get("llm_extraction") or {}
+    relevance = record.get("flatcar_relevance") or {}
+    identity = (
+        extraction.get("package_purl")
+        or extraction.get("package_identity")
+        or extraction.get("package_name")
+    )
+    confirmed_scopes = [
+        "sdk-only" if entry["scope"] == "sdk_only" else "sysext"
+        for entry in relevance.get("scope_evidence") or []
+        if isinstance(entry, dict)
+        and entry.get("validated") is True
+        and str(entry.get("source") or "").strip()
+        and entry.get("scope") in {"sdk_only", "sysext"}
+        and (entry["scope"] != "sdk_only" or relevance.get("scope") != "production")
+        and package_identities_match(identity, entry.get("package"))
+    ]
+    trusted_labels = issue_labels(
+        extraction.get("cvss_scores"),
+        relevance.get("scope")
+        if relevance.get("scope") in {"sdk_only", "sysext"}
+        else None,
+        " ".join(confirmed_scopes),
+    )
     if proposed:
         title = str(proposed.get("title") or "")
         body = str(proposed.get("body") or "")
         labels = list(proposed.get("labels") or [])
+        labels = [
+            label
+            for label in labels
+            if label not in {"advisory/only-sdk", "advisory/sysext"}
+        ]
+        labels.extend(
+            label
+            for label in trusted_labels
+            if label in {"advisory/only-sdk", "advisory/sysext"}
+        )
     else:
-        relevance = record.get("flatcar_relevance") or {}
         package_name = str(extraction.get("package_name") or "")
         title = f"update: {package_name}"
         gentoo_ref = extraction.get("gentoo_ref")
@@ -697,16 +1090,16 @@ def _create_payload(record: dict[str, Any]) -> dict[str, Any]:
             extraction.get("summary"),
             gentoo_ref if is_gentoo_reference(gentoo_ref) else None,
         )
-        labels = issue_labels(
-            extraction.get("cvss_scores"),
-            relevance.get("scope"),
-            extraction.get("scope_assessment"),
-        )
+        labels = trusted_labels
+    body = with_package_identity(body, identity)
     return {
         "title": title,
         "body": body,
         "labels": labels,
         "package_name": extraction.get("package_name"),
+        "package_identity": extraction.get("package_purl")
+        or extraction.get("package_identity")
+        or extraction.get("package_name"),
         "cves": extraction.get("cves") or [],
     }
 
@@ -743,35 +1136,74 @@ def _update_payload(record: dict[str, Any], target_issue: int) -> dict[str, Any]
     extraction = record.get("llm_extraction") or {}
     upstream_activity = record.get("upstream_activity") or {}
     matches = record.get("existing_issue_matches") or []
-    match = next(
+    match: dict[str, Any] = next(
         (item for item in matches if int(item.get("issue", -1)) == target_issue),
-        matches[0] if matches else {},
+        {},
     )
     proposed_update = record.get("proposed_update") or {}
     return {
         "issue": target_issue,
         "field_additions": _field_additions(extraction, upstream_activity, record),
         "comment_body": proposed_update.get("comment_body"),
-        "expected_package": match.get("package") or extraction.get("package_name"),
+        "expected_package": extraction.get("package_purl")
+        or extraction.get("package_identity")
+        or extraction.get("package_name"),
         "expected_cves": list(match.get("cves") or []),
     }
+
+
+def _reliable_update_matches(record: dict[str, Any]) -> list[dict[str, Any]]:
+    extraction = record.get("llm_extraction") or {}
+    package = (
+        extraction.get("package_purl")
+        or extraction.get("package_identity")
+        or extraction.get("package_name")
+    )
+    matches: dict[int, dict[str, Any]] = {}
+    for match in record.get("existing_issue_matches") or []:
+        if (
+            package_identities_match(package, match.get("package"))
+            and match.get("state", "open") == "open"
+            and isinstance(match.get("issue"), int)
+        ):
+            number = match["issue"]
+            if number in matches and matches[number] != match:
+                return []
+            matches[number] = match
+    return list(matches.values())
+
+
+def _has_unvalidated_claims(record: dict[str, Any]) -> bool:
+    validation = (record.get("llm_extraction") or {}).get("evidence_validation")
+    return isinstance(validation, dict) and (
+        bool(validation.get("errors"))
+        or validation.get("status") not in {None, "validated"}
+    )
 
 
 def _discovery_normal_group(
     record: dict[str, Any], action: str | None
 ) -> DecisionGroup:
-    record_id = str(record.get("record_id") or "")
+    record_id = str(record.get("record_id") or compute_digest(record))
     kind = _DISCOVERY_KIND_BY_ACTION.get(action or "")
     group_id = _group_id("discovery", record_id)
     target_issue: int | None = None
     payload: dict[str, Any] = {}
     label = "Approve the recommended action"
 
+    if kind in {
+        DISCOVERY_KIND_CREATE,
+        DISCOVERY_KIND_UPDATE,
+    } and _has_unvalidated_claims(record):
+        return _discovery_manual_group(record)
     if kind == DISCOVERY_KIND_CREATE and record.get("proposed_issue"):
         payload = _create_payload(record)
         label = f"Create new advisory issue: {payload['title']}"
     elif kind == DISCOVERY_KIND_UPDATE and record.get("proposed_update"):
         target_issue = int(record["proposed_update"]["issue"])
+        matches = _reliable_update_matches(record)
+        if len(matches) != 1 or matches[0]["issue"] != target_issue:
+            return _discovery_manual_group(record)
         payload = _update_payload(record, target_issue)
         label = f"Update existing issue #{target_issue} with new upstream context"
     elif kind == DISCOVERY_KIND_IGNORE:
@@ -802,7 +1234,7 @@ def _discovery_normal_group(
 
 
 def _discovery_manual_group(record: dict[str, Any]) -> DecisionGroup:
-    record_id = str(record.get("record_id") or "")
+    record_id = str(record.get("record_id") or compute_digest(record))
     group_id = _group_id("discovery", record_id)
     candidates: list[ActionCandidate] = []
 
@@ -810,7 +1242,8 @@ def _discovery_manual_group(record: dict[str, Any]) -> DecisionGroup:
     package_name = str(extraction.get("package_name") or "").strip()
     cves = [cve for cve in (extraction.get("cves") or []) if str(cve).strip()]
     summary = str(extraction.get("summary") or "").strip()
-    if package_name and (cves or (summary and summary.upper() != "TBD")):
+    grounded = not _has_unvalidated_claims(record)
+    if grounded and package_name and (cves or (summary and summary.upper() != "TBD")):
         payload = _create_payload(record)
         candidates.append(
             ActionCandidate(
@@ -825,8 +1258,8 @@ def _discovery_manual_group(record: dict[str, Any]) -> DecisionGroup:
             )
         )
 
-    existing_matches = record.get("existing_issue_matches") or []
-    if existing_matches:
+    existing_matches = _reliable_update_matches(record)
+    if grounded and len(existing_matches) == 1:
         target_issue = int(existing_matches[0]["issue"])
         payload = _update_payload(record, target_issue)
         candidates.append(
@@ -890,6 +1323,10 @@ def _cleanup_payload(record: dict[str, Any], issue_number: int) -> dict[str, Any
         "comment_body": comment_body,
         "expected_package": record.get("package_from_issue"),
         "expected_cves": record.get("cves_from_issue") or [],
+        "expected_issue_body_sha256": record.get("issue_body_sha256"),
+        "expected_scope_labels": sorted(
+            set(record.get("labels") or []) & {"advisory/only-sdk", "advisory/sysext"}
+        ),
     }
 
 
@@ -1090,12 +1527,12 @@ def _render_candidate_preview(candidate: ActionCandidate) -> str:
             )
         if additions.get("action_needed"):
             add_lines.append(
-                "- Action Needed (only applied if currently TBD): "
+                "- Action Needed (only applied if missing or currently TBD): "
                 f"{_truncate_md(additions['action_needed'], 200)}"
             )
         if additions.get("summary"):
             add_lines.append(
-                "- Summary (only applied if currently TBD): "
+                "- Summary (only applied if missing or currently TBD): "
                 f"{_truncate_md(additions['summary'])}"
             )
         body = (
@@ -1117,7 +1554,8 @@ def _render_candidate_preview(candidate: ActionCandidate) -> str:
             )
         preview += (
             "\nThis update is re-applied against the issue's current body at "
-            "apply time and never removes existing content.\n</details>\n"
+            "apply time and never removes existing content. Missing official fields "
+            "are added; existing human prose is preserved.\n</details>\n"
         )
         return preview
     if (
@@ -1157,21 +1595,21 @@ def _render_discovery_group(group: DecisionGroup, index: int) -> str:
             f"(discovery, source: {_md_escape(record.get('source'))})"
         ),
         "",
-        f"- Source URL: `{record.get('source_url') or 'n/a'}`",
+        f"- Source URL: `{_md_escape(record.get('source_url') or 'n/a')}`",
         "- CVEs / upstream IDs: "
         + (
-            ", ".join(cves)
+            _md_escape(", ".join(cves))
             if cves
             else _md_escape(record.get("raw_advisory_id")) or "n/a"
         ),
-        f"- CVSS: {', '.join(cvss) if cvss else 'n/a'}",
+        f"- CVSS: {_md_escape(', '.join(cvss)) if cvss else 'n/a'}",
         (
-            f"- Flatcar relevance: **{relevance.get('status')}** "
-            f"(scope: {relevance.get('scope')})"
+            f"- Flatcar relevance: **{_md_escape(relevance.get('status'))}** "
+            f"(scope: {_md_escape(relevance.get('scope'))})"
         ),
         (
-            f"- Recommendation: **{decision.get('action')}** "
-            f"(confidence: {decision.get('confidence')})"
+            f"- Recommendation: **{_md_escape(decision.get('action'))}** "
+            f"(confidence: {_md_escape(decision.get('confidence'))})"
         ),
     ]
     sbom_matches = record.get("sbom_package_matches") or []
@@ -1180,8 +1618,8 @@ def _render_discovery_group(group: DecisionGroup, index: int) -> str:
             "- SBOM matches: "
             + "; ".join(
                 (
-                    f"{match.get('name')} {match.get('versionInfo')} "
-                    f"({match.get('match_type')})"
+                    f"{_md_escape(match.get('name'))} {_md_escape(match.get('versionInfo'))} "
+                    f"({_md_escape(match.get('match_type'))})"
                 )
                 for match in sbom_matches
             )
@@ -1194,7 +1632,7 @@ def _render_discovery_group(group: DecisionGroup, index: int) -> str:
             "- Existing issue matches: "
             + "; ".join(
                 (
-                    f"#{match.get('issue')} ({match.get('state')}): "
+                    f"#{_md_escape(match.get('issue'))} ({_md_escape(match.get('state'))}): "
                     f"{_md_escape(match.get('title'))}"
                 )
                 for match in issue_matches
@@ -1215,6 +1653,14 @@ def _render_discovery_group(group: DecisionGroup, index: int) -> str:
                     "- Safety/ambiguity notes: "
                     f"{_md_escape('; '.join(str(reason) for reason in manual_reasons))}"
                 ),
+            ]
+        )
+    if _has_unvalidated_claims(record):
+        lines.extend(
+            [
+                "",
+                "Advisory mutations are withheld because source-grounding validation failed. "
+                "Unsupported claims remain in the original report for investigation.",
             ]
         )
 
@@ -1248,18 +1694,18 @@ def _render_cleanup_group(group: DecisionGroup, index: int) -> str:
             f"{_md_escape(record.get('title'))} (cleanup)"
         ),
         "",
-        f"- Package: {record.get('package_from_issue') or 'unknown'}",
-        f"- CVEs: {', '.join(record.get('cves_from_issue') or []) or 'n/a'}",
+        f"- Package: {_md_escape(record.get('package_from_issue') or 'unknown')}",
+        f"- CVEs: {_md_escape(', '.join(record.get('cves_from_issue') or []) or 'n/a')}",
         (
             "- Required fixed version (Action Needed): "
-            f"{record.get('fixed_version_requirement') or 'unparsed'}"
+            f"{_md_escape(record.get('fixed_version_requirement') or 'unparsed')}"
         ),
         (
-            f"- Status: **{record.get('status')}** "
-            f"(confidence: {record.get('confidence')})"
+            f"- Status: **{_md_escape(record.get('status'))}** "
+            f"(confidence: {_md_escape(record.get('confidence'))})"
         ),
         "- Current issue state (at report time): open",
-        f"- Issue link: {record.get('issue_url')}",
+        f"- Issue link: {_md_escape(record.get('issue_url'))}",
     ]
     matches = record.get("sbom_package_matches") or []
     if matches:
@@ -1267,8 +1713,8 @@ def _render_cleanup_group(group: DecisionGroup, index: int) -> str:
             "- SBOM matches: "
             + "; ".join(
                 (
-                    f"{match.get('name')} {match.get('versionInfo')} "
-                    f"({match.get('match_type')})"
+                    f"{_md_escape(match.get('name'))} {_md_escape(match.get('versionInfo'))} "
+                    f"({_md_escape(match.get('match_type'))})"
                 )
                 for match in matches
             )
@@ -1303,6 +1749,33 @@ def _render_cleanup_group(group: DecisionGroup, index: int) -> str:
 
 
 def _render_group(group: DecisionGroup, index: int) -> str:
+    if group.source == "feedback":
+        package = (group.record.get("llm_extraction") or {}).get(
+            "package_name"
+        ) or "unknown"
+        lines = [
+            "<details><summary>Optional reviewer feedback — "
+            f"{_md_escape(package)}</summary>",
+            "",
+            "Optional, independent feedback for this exact evidence. It does not mutate advisory issues. "
+            "Leave every box unchecked unless explicitly recording a decision. "
+            "Wrong package / not shipped / already addressed / deferred suppress unchanged future findings; "
+            "track uncertain keeps them visible; revoke restores tracking. "
+            "Feedback conflicting with a selected advisory mutation is ignored along with that mutation.",
+            "",
+        ]
+        lines.extend(
+            render_checkbox_line(candidate.action_id, candidate.label)
+            for candidate in group.candidates
+        )
+        lines.extend(["", "</details>"])
+        return "\n".join(lines) + "\n"
+    if _is_suppressed(group.record):
+        return (
+            f"### Group {index}: suppressed\n\n"
+            f"{_md_escape(group.record.get('review_suppression'))}\n\n"
+            "No advisory actions are offered for this suppressed decision.\n"
+        )
     if group.source == "discovery":
         return _render_discovery_group(group, index)
     return _render_cleanup_group(group, index)
@@ -1323,18 +1796,26 @@ def _group_severity(group: DecisionGroup) -> str:
 
 
 def _render_counts_table(groups: list[DecisionGroup]) -> list[str]:
+    groups = [group for group in groups if group.source != "feedback"]
     if not groups:
         return ["", "(no decision groups)"]
     kind_counts = Counter(
-        group.candidates[0].kind if group.candidates else "unknown" for group in groups
+        str((group.record.get("decision") or {}).get("action") or "needs_manual_review")
+        if group.source == "discovery"
+        else str(group.record.get("recommended_action") or "manual_review")
+        for group in groups
     )
     confidence_counts = Counter(_group_confidence(group) for group in groups)
     severity_counts = Counter(_group_severity(group) for group in groups)
     lines = ["", "| Recommendation | Count |", "| --- | --- |"]
-    lines.extend(f"| {kind} | {count} |" for kind, count in sorted(kind_counts.items()))
+    lines.extend(
+        f"| {_md_escape(kind)} | {count} |"
+        for kind, count in sorted(kind_counts.items())
+    )
     lines.extend(["", "| Confidence | Count |", "| --- | --- |"])
     lines.extend(
-        f"| {level} | {count} |" for level, count in sorted(confidence_counts.items())
+        f"| {_md_escape(level)} | {count} |"
+        for level, count in sorted(confidence_counts.items())
     )
     lines.extend(["", "| Severity | Count |", "| --- | --- |"])
     lines.extend(
@@ -1401,7 +1882,7 @@ def _render_header(
             "",
             "## Summary",
             "",
-            f"This part contains {len(part_groups)} decision group(s).",
+            f"This part contains {sum(group.source != 'feedback' for group in part_groups)} decision group(s).",
         ]
     )
     lines.extend(_render_counts_table(part_groups))
@@ -1410,7 +1891,7 @@ def _render_header(
             [
                 "",
                 (
-                    f"Whole batch: {len(all_groups)} decision group(s) "
+                    f"Whole batch: {sum(group.source != 'feedback' for group in all_groups)} decision group(s) "
                     f"across {part_count} part(s)."
                 ),
             ]
@@ -1470,9 +1951,14 @@ def _render_footer(marker_block: str, manifest_block: str) -> str:
 
 
 def _manifest_group(group: DecisionGroup) -> dict[str, Any]:
-    return {
+    result = {
         "group_id": group.group_id,
         "source": group.source,
+        "package": (group.record.get("llm_extraction") or {}).get("package_name")
+        or group.record.get("package_from_issue"),
+        "target_issue": group.record.get("issue")
+        if group.source == "cleanup"
+        else None,
         "actions": [
             {
                 "action_id": candidate.action_id,
@@ -1483,6 +1969,12 @@ def _manifest_group(group: DecisionGroup) -> dict[str, Any]:
             for candidate in group.candidates
         ],
     }
+    if group.source == "feedback":
+        result["feedback_for_group_id"] = _group_id(
+            "discovery",
+            str(group.record.get("record_id") or compute_digest(group.record)),
+        )
+    return result
 
 
 #: Hard ceiling GitHub enforces on issue bodies. `DEFAULT_MAX_PART_BODY_CHARS`
@@ -1505,19 +1997,53 @@ def _pack_groups(
     packed: list[list[tuple[DecisionGroup, str, int]]] = []
     current: list[tuple[DecisionGroup, str, int]] = []
     current_len = 0
+    units: list[list[tuple[DecisionGroup, str, int]]] = []
     for item in rendered_groups:
-        _, _, item_len = item
+        group = item[0]
+        if (
+            group.source == "feedback"
+            and units
+            and units[-1][-1][0].source == "discovery"
+            and units[-1][-1][0].record is group.record
+        ):
+            units[-1].append(item)
+        else:
+            units.append([item])
+    for unit in units:
+        item_len = sum(item[2] for item in unit)
         # A single group larger than the budget still gets its own part
         # rather than being split mid-group or dropped.
         if current and current_len + item_len > max_group_chars:
             packed.append(current)
             current = []
             current_len = 0
-        current.append(item)
+        current.extend(unit)
         current_len += item_len
     if current:
         packed.append(current)
     return packed
+
+
+def _omission_summary(omissions: list[dict[str, Any]]) -> dict[str, Any]:
+    categories: dict[str, dict[str, Any]] = {}
+    for item in omissions:
+        reason = str(item["reason"])
+        category = categories.setdefault(
+            reason,
+            {
+                "reason": reason,
+                "count": 0,
+                "examples": [],
+                "explanation": str(item.get("explanation") or "")[:160],
+            },
+        )
+        category["count"] += 1
+        if len(category["examples"]) < 3:
+            category["examples"].append(str(item["record_id"])[:80])
+    return {
+        "total_records": len(omissions),
+        "categories": [categories[key] for key in sorted(categories)],
+    }
 
 
 def _finalize_part(
@@ -1526,10 +2052,37 @@ def _finalize_part(
     part_count: int,
     group_slice: list[tuple[DecisionGroup, str, int]],
     all_groups: list[DecisionGroup],
+    omissions: list[dict[str, Any]] | None = None,
 ) -> ReviewPart:
     groups = [group for group, _, _ in group_slice]
     group_text = "\n".join(text for _, text, _ in group_slice)
     header = _render_header(context, part_index, part_count, groups, all_groups)
+    omission_summary = _omission_summary(omissions or [])
+    if omissions:
+        audit_lines = [
+            "## Omitted decisions audit",
+            "",
+            f"Omitted records: {len(omissions)}",
+        ]
+        for category in omission_summary["categories"]:
+            audit_lines.append(
+                f"- {_md_escape(category['reason'])}: {category['count']}; "
+                f"examples: {_md_escape(', '.join(category['examples']))}"
+                + (
+                    f" — {_md_escape(category['explanation'])}"
+                    if category["explanation"]
+                    else ""
+                )
+            )
+        audit_lines.extend(
+            [
+                "",
+                "Full omitted IDs, reasons, and evidence remain in the discovery/cleanup JSON reports "
+                "and the local review audit JSON; this issue contains bounded examples only.",
+                f"Report artifacts: {_md_escape(context.discovery_report_url or context.cleanup_report_url or context.run_url or 'the reports supplied to this review run')}",
+            ]
+        )
+        header += "\n\n" + "\n".join(audit_lines) + "\n"
     part_id = f"{context.run_id}-part-{part_index}"
     manifest_without_digest: dict[str, Any] = {
         "schema_version": REVIEW_SCHEMA_VERSION,
@@ -1544,9 +2097,13 @@ def _finalize_part(
         "advisory_repo": context.advisory_repo,
         "review_repo": context.review_repo,
         "groups": [_manifest_group(group) for group in groups],
+        "omission_summary": omission_summary,
     }
     digest = compute_digest(manifest_without_digest)
     manifest = {**manifest_without_digest, "digest": digest}
+    validate_manifest_against_context(
+        manifest, context.advisory_repo, context.review_repo
+    )
     marker_block = render_marker_block(context.run_id, part_id, part_index, part_count)
     manifest_block = embed_manifest(manifest)
     footer = _render_footer(marker_block, manifest_block)
@@ -1591,33 +2148,86 @@ def build_review_batch(
     dry-run) commands so both produce byte-identical part titles/bodies for
     the same inputs.
     """
+    omissions: list[dict[str, Any]] = []
     all_groups = [
-        *build_discovery_groups(discovery_document),
-        *build_cleanup_groups(cleanup_document),
+        *build_discovery_groups(discovery_document, context, omissions=omissions),
+        *build_cleanup_groups(cleanup_document, context, omissions=omissions),
     ]
+    if context.enable_feedback and discovery_document:
+        # Full reviews expose suppressed records for explicit correction/revocation.
+        # Compact summaries never re-expand omitted records into feedback menus.
+        for record in _unique_records(discovery_document, "discovery"):
+            if (record.get("source") == "go_vulndb" and not context.include_go) or (
+                record.get("source") == "rustsec" and not context.include_rust
+            ):
+                continue
+            related_index = next(
+                (
+                    index
+                    for index, group in enumerate(all_groups)
+                    if group.record is record and group.source == "discovery"
+                ),
+                None,
+            )
+            if related_index is None:
+                continue
+            group = _feedback_group(record, context)
+            if group is not None:
+                all_groups.insert(related_index + 1, group)
+    validation_manifest = {
+        "schema_version": REVIEW_SCHEMA_VERSION,
+        "batch_id": context.run_id,
+        "part_id": context.run_id,
+        "part_index": 1,
+        "part_count": 1,
+        "advisory_repo": context.advisory_repo,
+        "review_repo": context.review_repo,
+        "groups": [_manifest_group(group) for group in all_groups],
+    }
+    validate_manifest_against_context(
+        validation_manifest, context.advisory_repo, context.review_repo
+    )
     rendered_groups: list[tuple[DecisionGroup, str, int]] = []
-    for index, group in enumerate(all_groups):
-        text = _render_group(group, index + 1)
+    index = 0
+    for group in all_groups:
+        if group.source != "feedback":
+            index += 1
+        text = _render_group(group, index)
         # Packing must weigh both the human-readable rendered text *and* this
         # group's contribution to the base64-encoded manifest embedded in the
         # footer -- the manifest re-serializes the same proposed
         # titles/bodies/comments, so ignoring it would let a part's real
         # rendered size silently exceed the configured (and GitHub's hard)
         # body-size limit.
-        manifest_json_len = len(canonical_json(_manifest_group(group)))
+        manifest_json_len = len(
+            canonical_json(_manifest_for_storage({"groups": [_manifest_group(group)]}))
+        )
         combined_len = len(text) + int(manifest_json_len * _MANIFEST_SIZE_SAFETY_FACTOR)
         rendered_groups.append((group, text, combined_len))
+    audit_budget = (
+        int(len(canonical_json(_omission_summary(omissions))) * 3) if omissions else 0
+    )
     max_group_chars = max(
-        context.max_part_body_chars - _RESERVED_OVERHEAD_CHARS, _MIN_GROUP_BUDGET_CHARS
+        context.max_part_body_chars - _RESERVED_OVERHEAD_CHARS - audit_budget,
+        _MIN_GROUP_BUDGET_CHARS,
     )
     packed = _pack_groups(rendered_groups, max_group_chars)
     slices = packed or [[]]
     part_count = len(slices)
     parts = [
-        _finalize_part(context, part_index, part_count, group_slice, all_groups)
+        _finalize_part(
+            context,
+            part_index,
+            part_count,
+            group_slice,
+            all_groups,
+            omissions if part_index == 1 else [],
+        )
         for part_index, group_slice in enumerate(slices, start=1)
     ]
-    return ReviewBatch(batch_id=context.run_id, parts=parts, groups=all_groups)
+    return ReviewBatch(
+        batch_id=context.run_id, parts=parts, groups=all_groups, omissions=omissions
+    )
 
 
 # --- Local dry-run rendering (no GitHub calls) -------------------------------
@@ -1674,7 +2284,7 @@ def _render_dry_run_summary(
         f"Batch ID: `{batch.batch_id}`",
         f"Would create in repository: `{review_repo}`",
         f"Parts: {len(batch.parts)}",
-        f"Total decision groups: {len(batch.groups)}",
+        f"Total decision groups: {sum(group.source != 'feedback' for group in batch.groups)}",
         "",
         "No GitHub API calls were made while generating this output.",
         "",
@@ -1682,10 +2292,15 @@ def _render_dry_run_summary(
         "| --- | --- | --- | --- |",
     ]
     for part, path in zip(batch.parts, part_paths, strict=True):
+        decision_count = sum(
+            group["source"] != "feedback" for group in part.manifest["groups"]
+        )
         lines.append(
             f"| {part.part_index}/{part.part_count} | {part.title} | "
-            f"`{path.name}` | {len(part.group_ids)} |"
+            f"`{path.name}` | {decision_count} |"
         )
+    if batch.omissions:
+        lines.extend(["", "Complete omitted-record audit: `review-audit.json`."])
     return "\n".join(lines) + "\n"
 
 
@@ -1708,6 +2323,12 @@ def write_dry_run_batch(
     summary_path.write_text(
         _render_dry_run_summary(batch, review_repo, part_paths), encoding="utf-8"
     )
+    if batch.omissions:
+        (directory / "review-audit.json").write_text(
+            canonical_json({"batch_id": batch.batch_id, "omissions": batch.omissions})
+            + "\n",
+            encoding="utf-8",
+        )
     return [*part_paths, summary_path]
 
 
@@ -1744,11 +2365,45 @@ def create_review_batch(
     created moments earlier, even though the Search index is only eventually
     consistent.
     """
+    # Validate every part before even creating labels: never publish half a batch
+    # only to discover a corrupt/duplicate action in a later part.
+    seen_ids: set[str] = set()
+    seen_parts: set[str] = set()
+    seen_groups: set[str] = set()
+    for part in batch.parts:
+        manifest = extract_manifest(part.body)
+        validate_manifest_against_context(
+            manifest, str(part.manifest.get("advisory_repo") or ""), client.repo
+        )
+        if manifest != part.manifest or find_batch_part_marker(part.body) != (
+            part.batch_id,
+            part.part_id,
+        ):
+            raise ManifestValidationError("Review part body and metadata disagree")
+        if part.part_id in seen_parts:
+            raise ManifestValidationError("Duplicate review part ID")
+        seen_parts.add(part.part_id)
+        for group in manifest["groups"]:
+            if group["group_id"] in seen_groups:
+                raise ManifestValidationError(
+                    "Duplicate decision group ID across review parts"
+                )
+            seen_groups.add(group["group_id"])
+            for action in group["actions"]:
+                if action["action_id"] in seen_ids:
+                    raise ManifestValidationError(
+                        "Duplicate action ID across review parts"
+                    )
+                seen_ids.add(action["action_id"])
     ensure_review_label(client)
     existing_by_part_id: dict[str, Issue] = {}
     for issue in client.list_issues_by_label(REVIEW_LABEL, state="all"):
         marker = find_batch_part_marker(issue.body)
-        if marker:
+        if marker and marker[1] in seen_parts:
+            if marker[1] in existing_by_part_id:
+                raise ManifestValidationError(
+                    "Multiple review issues carry the same part ID"
+                )
             existing_by_part_id.setdefault(marker[1], issue)
 
     results: list[PartCreationResult] = []
@@ -1817,24 +2472,20 @@ def _identity_matches(
     Fails closed (returns False) whenever there is nothing concrete to
     confirm identity against, rather than assuming an untouched match.
     """
-    expected_name = normalize_name(str(expected_package or ""))
-    current_name = normalize_name(parsed.name or "")
-    if expected_name and current_name and expected_name == current_name:
-        return True
-    expected_cve_set = {str(cve).upper() for cve in expected_cves if str(cve).strip()}
-    current_cve_set = {cve.upper() for cve in parsed.cves}
-    if expected_cve_set and current_cve_set and expected_cve_set & current_cve_set:
-        return True
-    return False
+    return package_identities_match(str(expected_package or ""), parsed.identity)
 
 
 def _translate_guarded_result(result: dict[str, Any]) -> dict[str, Any]:
     outcome = result.get("outcome")
-    if outcome == "blocked":
-        return {"outcome": "skipped", "reason": result.get("reason")}
-    if outcome == "no_op":
-        return {"outcome": "no_op", "reason": result.get("reason")}
-    return {"outcome": "applied", "reason": None}
+    response = result.get("result") or {}
+    return {
+        "outcome": "skipped" if outcome == "blocked" else outcome,
+        "reason": result.get("reason"),
+        "operation": result.get("action"),
+        "issue": response.get("number"),
+        "issue_url": response.get("html_url"),
+        "result": response,
+    }
 
 
 def _combine_results(*results: dict[str, Any] | None) -> dict[str, Any]:
@@ -1867,35 +2518,80 @@ def _execute_discovery_create(
     runner: GitHubActionRunner,
 ) -> dict[str, Any]:
     try:
-        current_issues = client.fetch_open_advisory_issues()
+        current_issues = client.list_issues(state="all")
+        current_issues.extend(issue_from_api(item) for item in runner.created_issues)
+        current_issues = list(
+            {issue.number: issue for issue in current_issues}.values()
+        )
     except Exception as exc:  # noqa: BLE001 - surfaced as a failed outcome, not raised
         return {
             "outcome": "failed",
             "reason": (
-                "Could not fetch current advisory issues for the fresh "
-                f"duplicate check: {exc}"
+                "Could not list current issues for the fresh "
+                f"duplicate check ({type(exc).__name__})"
             ),
+        }
+    marker = f"<!-- security-triage:action-id:{action_id} -->"
+    created = [
+        issue
+        for issue in current_issues
+        if REVIEW_LABEL not in issue.labels
+        and marker in issue.body.splitlines()
+        and package_identities_match(
+            payload.get("package_identity") or payload.get("package_name"),
+            parse_issue_body(issue.body).identity,
+        )
+    ]
+    if len(created) > 1:
+        return {
+            "outcome": "failed",
+            "reason": "Multiple issues carry this create action ID; manual review required",
+        }
+    if created:
+        return {
+            "outcome": "no_op",
+            "reason": "This action already created an issue",
+            "issue": created[0].number,
+            "issue_url": created[0].html_url,
         }
     duplicate_matches = find_existing_issue_matches(
         {
             "package_name": payload.get("package_name"),
+            "package_identity": payload.get("package_identity"),
             "cves": payload.get("cves") or [],
         },
-        current_issues,
+        [
+            issue
+            for issue in current_issues
+            if issue.state == "open" and REVIEW_LABEL not in issue.labels
+        ],
     )
+    if not duplicate_matches and payload.get("package_identity"):
+        # An ambiguous bare-name issue is not authority to update a namespaced
+        # package, but it is enough to withhold a potentially duplicate create.
+        duplicate_matches = find_existing_issue_matches(
+            {"package_name": payload.get("package_name")},
+            [issue for issue in current_issues if issue.state == "open"],
+        )
     if duplicate_matches:
         return {
             "outcome": "skipped",
             "reason": (
-                "A matching advisory issue now exists "
-                f"(#{duplicate_matches[0]['issue']}); skipping create "
+                "A matching package update issue now exists "
+                f"({', '.join('#' + str(match['issue']) for match in duplicate_matches)}); skipping create "
                 "to avoid a duplicate"
             ),
+            "issue": duplicate_matches[0]["issue"]
+            if len(duplicate_matches) == 1
+            else None,
+            "issue_url": duplicate_matches[0]["issue_url"]
+            if len(duplicate_matches) == 1
+            else None,
         }
     result = runner.create_issue_guarded(
         action_id,
         str(payload.get("title") or ""),
-        str(payload.get("body") or ""),
+        _with_action_marker(str(payload.get("body") or ""), action_id),
         list(payload.get("labels") or []),
     )
     return _translate_guarded_result(result)
@@ -1913,14 +2609,21 @@ def _execute_discovery_update(
     except Exception as exc:  # noqa: BLE001
         return {
             "outcome": "failed",
-            "reason": f"Could not fetch issue #{issue_number}: {exc}",
+            "reason": f"Could not fetch issue #{issue_number} ({type(exc).__name__})",
         }
     if current_issue.state != "open":
         return {
             "outcome": "skipped",
             "reason": f"Issue #{issue_number} is no longer open",
         }
+    if not is_package_update_issue(current_issue):
+        return {
+            "outcome": "skipped",
+            "reason": f"Issue #{issue_number} is no longer a package update or advisory issue",
+        }
     parsed = parse_issue_body(current_issue.body)
+    if parsed.name is None:
+        parsed.name = issue_package_from_title(current_issue.title)
     if not _identity_matches(
         parsed, payload.get("expected_package"), payload.get("expected_cves") or []
     ):
@@ -1933,7 +2636,7 @@ def _execute_discovery_update(
         }
 
     additions = payload.get("field_additions") or {}
-    updated_body = current_issue.body
+    updated_body = ensure_issue_fields(current_issue.body, str(parsed.name or ""))
     updated_body = append_field_values(
         updated_body, "CVEs", additions.get("cves") or []
     )
@@ -1956,16 +2659,23 @@ def _execute_discovery_update(
     comment_body = payload.get("comment_body")
     comment_result = None
     if comment_body:
-        already_posted = _has_marker_comment(
-            client.list_comments(issue_number), action_id
-        )
-        comment_result = runner.post_comment_guarded(
-            action_id,
-            issue_number,
-            _with_action_marker(str(comment_body), action_id),
-            required_permission="update_existing_issues",
-            already_posted=already_posted,
-        )
+        try:
+            already_posted = _has_marker_comment(
+                client.list_comments(issue_number), action_id
+            )
+            comment_result = runner.post_comment_guarded(
+                action_id,
+                issue_number,
+                _with_action_marker(str(comment_body), action_id),
+                required_permission="update_existing_issues",
+                already_posted=already_posted,
+            )
+        except Exception as exc:
+            comment_result = {
+                "action": "post_comment",
+                "outcome": "failed",
+                "reason": f"Could not check comment history ({type(exc).__name__})",
+            }
 
     return _combine_results(body_result, comment_result)
 
@@ -1983,17 +2693,34 @@ def _execute_cleanup_comment(
     except Exception as exc:  # noqa: BLE001
         return {
             "outcome": "failed",
-            "reason": f"Could not fetch issue #{issue_number}: {exc}",
+            "reason": f"Could not fetch issue #{issue_number} ({type(exc).__name__})",
         }
     if current_issue.state != "open":
         return {
             "outcome": "skipped",
             "reason": f"Issue #{issue_number} is already closed; taking no action",
         }
+    expected_body_digest = payload.get("expected_issue_body_sha256")
+    expected_scope_labels = payload.get("expected_scope_labels")
+    if (
+        expected_body_digest
+        and hashlib.sha256(current_issue.body.encode("utf-8")).hexdigest()
+        != expected_body_digest
+    ) or (
+        expected_scope_labels is not None
+        and sorted(set(current_issue.labels) & {"advisory/only-sdk", "advisory/sysext"})
+        != expected_scope_labels
+    ):
+        return {
+            "outcome": "skipped",
+            "reason": f"Issue #{issue_number} body or scope changed since review generation",
+        }
     parsed = parse_issue_body(current_issue.body)
     if not _identity_matches(
         parsed, payload.get("expected_package"), payload.get("expected_cves") or []
-    ):
+    ) or {str(cve).strip().upper() for cve in payload.get("expected_cves") or []} != {
+        cve.strip().upper() for cve in parsed.cves
+    }:
         return {
             "outcome": "skipped",
             "reason": (
@@ -2011,10 +2738,10 @@ def _execute_cleanup_comment(
         required_permission="post_cleanup_comments",
         already_posted=already_posted,
     )
-    if (
-        kind == CLEANUP_KIND_COMMENT_AND_CLOSE
-        and comment_result.get("outcome") != "blocked"
-    ):
+    if kind == CLEANUP_KIND_COMMENT_AND_CLOSE and comment_result.get("outcome") in {
+        "applied",
+        "no_op",
+    }:
         close_result = runner.close_issue_guarded(
             action_id, issue_number, already_closed=False
         )
@@ -2028,6 +2755,15 @@ def _execute_action(
     kind = action.get("kind")
     action_id = action["action_id"]
     payload = action.get("payload") or {}
+    if kind == FEEDBACK_KIND:
+        return {
+            "outcome": "no_op",
+            "reason": "Explicit reviewer feedback recorded; no advisory mutation",
+            "status": "feedback_recorded",
+            "feedback": validate_feedback_payload(
+                payload, advisory_repository=client.repo
+            ),
+        }
     if kind in NON_MUTATING_KINDS:
         return {"outcome": "no_op", "reason": f"{kind} performs no GitHub mutation"}
     if kind == DISCOVERY_KIND_CREATE:
@@ -2040,9 +2776,16 @@ def _execute_action(
 
 
 def _render_execution_summary(
-    execution_results: list[dict[str, Any]], unknown_ids: list[str]
+    execution_results: list[dict[str, Any]],
+    unknown_ids: list[str],
+    selected_ids: list[str] | None = None,
 ) -> str:
     lines = ["## Security-triage review apply summary", ""]
+    lines.append(
+        "Selected action IDs at execution time: "
+        + (", ".join(f"`{item}`" for item in selected_ids or []) or "(none)")
+    )
+    lines.append("")
     counts = Counter(result["outcome"] for result in execution_results)
     lines.append(
         ", ".join(f"{outcome}: {count}" for outcome, count in sorted(counts.items()))
@@ -2054,10 +2797,22 @@ def _render_execution_summary(
         line = f"- Group `{result['group_id']}`: {result['outcome']}"
         if result.get("action_id"):
             line += f" (action `{result['action_id']}`)"
+        if result.get("kind"):
+            line += f" — {_md_escape(result['kind'])}"
+        if result.get("package"):
+            line += f" — package: {_md_escape(result['package'])}"
+        if result.get("issue_url"):
+            line += f" — target/result: {_md_escape(result['issue_url'])}"
         reason = result.get("reason")
         if reason:
             line += f" — {_quote(reason)}"
         lines.append(line)
+        for detail in result.get("details") or []:
+            lines.append(
+                f"  - {_md_escape(detail.get('operation'))}: "
+                f"{_md_escape(detail.get('outcome'))}"
+                + (f" — {_quote(detail['reason'])}" if detail.get("reason") else "")
+            )
     if unknown_ids:
         lines.extend(
             ["", f"Unrecognized checked action ID(s) ignored: {', '.join(unknown_ids)}"]
@@ -2066,12 +2821,132 @@ def _render_execution_summary(
         [
             "",
             (
-                "This comment is posted once per applied review part; "
-                "re-running apply on an already-applied issue is a no-op."
+                "This is the execution-time selection snapshot, not the current "
+                "checkbox state. Failed attempts remain retryable; an already-applied "
+                "review is a no-op."
             ),
         ]
     )
     return "\n".join(lines)
+
+
+def _publish_execution_summary(
+    client: GitHubIssueClient,
+    issue_number: int,
+    summary: str,
+    *,
+    advisory_repository: str | None = None,
+) -> dict[str, Any]:
+    marker_id = f"review-summary-{issue_number}"
+    marker = f"<!-- security-triage:action-id:{marker_id} -->"
+    existing = [
+        comment
+        for comment in client.list_comments(issue_number)
+        if marker in str(comment.get("body") or "")
+        and is_trusted_feedback_author(comment)
+    ]
+    if len(existing) > 1:
+        raise ManifestValidationError("Multiple bot execution summaries found")
+    if existing and not _FEEDBACK_SUMMARY_BLOCK_RE.search(summary):
+        prior_blocks = _FEEDBACK_SUMMARY_BLOCK_RE.findall(
+            str(existing[0].get("body") or "")
+        )
+        if prior_blocks:
+            if len(prior_blocks) != 1 or not parse_feedback_summary(
+                client.get_issue(issue_number),
+                existing[0],
+                advisory_repository=advisory_repository or client.repo,
+                review_repository=client.repo,
+            ):
+                raise ManifestValidationError(
+                    "Cannot overwrite unverifiable prior feedback"
+                )
+            summary += (
+                "\n\nPreviously confirmed feedback is retained from its original execution snapshot; "
+                "unchecked boxes do not revoke it.\n\n" + prior_blocks[0]
+            )
+    body = _with_action_marker(summary, marker_id)
+    if existing:
+        if existing[0].get("body") != body:
+            return client.update_comment(int(existing[0]["id"]), body)
+        return existing[0]
+    return client.post_comment(issue_number, body)
+
+
+def _persist_feedback_receipt(
+    client: GitHubIssueClient,
+    issue: Issue,
+    manifest: dict[str, Any],
+    checked_ids: set[str],
+    execution_results: list[dict[str, Any]],
+    apply_context: ApplyContext,
+) -> bool:
+    """Persist immutable feedback independently of the replaceable execution summary."""
+    confirmed = []
+    for comment in client.list_comments(issue.number):
+        confirmed.extend(
+            parse_feedback_summary(
+                issue,
+                comment,
+                advisory_repository=apply_context.advisory_repo,
+                review_repository=apply_context.review_repo,
+            )
+        )
+    feedback_results = [
+        result
+        for result in execution_results
+        if result.get("status") == "feedback_recorded"
+    ]
+    if not feedback_results:
+        return bool(confirmed)
+    existing = {(item["action_id"], item["manifest_digest"]) for item in confirmed}
+    # A retry of the same feedback action is not a new reviewer decision.
+    # Unrelated checkbox changes must not refresh its timestamp past a revocation.
+    feedback_results = [
+        result
+        for result in feedback_results
+        if (result["action_id"], manifest["digest"]) not in existing
+    ]
+    if not feedback_results:
+        return True
+    desired = {(result["action_id"], manifest["digest"]) for result in feedback_results}
+    lines = [
+        "## Security-triage reviewer feedback receipt",
+        "",
+        "This immutable receipt records the original Completed apply selection. "
+        "Later checkbox edits do not revoke it; use an explicit revoke decision.",
+        "",
+    ]
+    lines.extend(
+        f"- {_md_escape(result.get('package'))}: "
+        f"{_md_escape(result['feedback']['decision'])} (`{result['action_id']}`)"
+        for result in feedback_results
+    )
+    lines.extend(
+        [
+            "",
+            render_feedback_summary(
+                manifest,
+                checked_ids,
+                feedback_results,
+                review_issue_number=issue.number,
+            ),
+        ]
+    )
+    response = client.post_comment(issue.number, "\n".join(lines))
+    persisted = parse_feedback_summary(
+        issue,
+        response,
+        advisory_repository=apply_context.advisory_repo,
+        review_repository=apply_context.review_repo,
+    )
+    if not desired <= {
+        (item["action_id"], item["manifest_digest"]) for item in persisted
+    }:
+        raise ManifestValidationError(
+            "Feedback receipt was not durably persisted by trusted automation"
+        )
+    return True
 
 
 def _gate_result(outcome: str, reason: str, issue_number: int) -> dict[str, Any]:
@@ -2134,15 +3009,43 @@ def apply_review_issue(
             issue_number,
         )
 
+    if (
+        review_client.repo != apply_context.review_repo
+        or advisory_client.repo != apply_context.advisory_repo
+        or runner.client.repo != apply_context.advisory_repo
+    ):
+        return _gate_result(
+            "failed", "Configured clients do not match apply repositories", issue_number
+        )
+
     try:
         manifest = extract_manifest(issue.body)
         validate_manifest_against_context(
             manifest, apply_context.advisory_repo, apply_context.review_repo
         )
+        if find_batch_part_marker(issue.body) != (
+            manifest["batch_id"],
+            manifest["part_id"],
+        ):
+            raise ManifestValidationError(
+                "Review marker and manifest identity disagree"
+            )
     except (ManifestCorruptionError, ManifestValidationError) as exc:
-        return _gate_result(
+        result = _gate_result(
             "failed", f"Review manifest failed validation: {exc}", issue_number
         )
+        try:
+            _publish_execution_summary(
+                review_client,
+                issue_number,
+                "## Security-triage review apply summary\n\n"
+                "Validation failed; no advisory actions were executed. No applied label was added.\n\n"
+                + _quote(result["reason"]),
+                advisory_repository=apply_context.advisory_repo,
+            )
+        except Exception:
+            result["summary_error"] = "Could not publish the validation failure summary"
+        return result
 
     checked_ids = parse_checked_action_ids(issue.body)
     unknown_ids = unknown_checked_action_ids(manifest, checked_ids)
@@ -2166,6 +3069,8 @@ def apply_review_issue(
         for resolution in resolutions
         if resolution.outcome == "selected" and resolution.selected_action is not None
     }
+    selected_ids = sorted(runner.allowed_action_ids)
+    group_metadata = {group["group_id"]: group for group in manifest["groups"]}
 
     execution_results: list[dict[str, Any]] = []
     all_terminal = True
@@ -2187,7 +3092,7 @@ def apply_review_issue(
                     "outcome": "conflict",
                     "action_id": None,
                     "reason": (
-                        "Multiple checked alternatives: "
+                        "Conflicting selected alternatives or mutation/feedback choices: "
                         f"{', '.join(resolution.checked_action_ids)}"
                     ),
                 }
@@ -2199,12 +3104,28 @@ def apply_review_issue(
             f"Executing action {action['action_id']} ({action['kind']}) "
             f"for group {resolution.group_id}"
         )
-        result = _execute_action(action, advisory_client, runner)
+        try:
+            result = _execute_action(action, advisory_client, runner)
+        except Exception as exc:
+            result = {
+                "outcome": "failed",
+                "reason": f"Action failed ({type(exc).__name__}); retry is safe",
+            }
         debug.log(
             "review_apply_action_result",
             action_id=action["action_id"],
             kind=action["kind"],
             result=result,
+        )
+        payload = action.get("payload") or {}
+        metadata = group_metadata[resolution.group_id]
+        target_issue = (
+            result.get("issue") or payload.get("issue") or metadata.get("target_issue")
+        )
+        issue_url = (
+            f"https://github.com/{apply_context.advisory_repo}/issues/{target_issue}"
+            if target_issue
+            else result.get("issue_url")
         )
         execution_results.append(
             {
@@ -2212,33 +3133,112 @@ def apply_review_issue(
                 "outcome": result["outcome"],
                 "action_id": action["action_id"],
                 "reason": result.get("reason"),
+                "kind": action["kind"],
+                "package": payload.get("package_name")
+                or payload.get("expected_package")
+                or metadata.get("package"),
+                "issue": target_issue,
+                "issue_url": issue_url,
+                "details": result.get("details") or [],
+                "status": result.get("status"),
+                "feedback": result.get("feedback"),
             }
         )
         if result["outcome"] == "failed":
             all_terminal = False
 
+    persistence_reason = None
+    try:
+        has_feedback = _persist_feedback_receipt(
+            review_client,
+            issue,
+            manifest,
+            checked_ids,
+            execution_results,
+            apply_context,
+        )
+    except Exception:
+        has_feedback = False
+        all_terminal = False
+        persistence_reason = "Could not persist the trusted feedback receipt; retry is safe and no applied label was added"
+        for result in execution_results:
+            if result.get("status") == "feedback_recorded":
+                result.update(
+                    outcome="failed",
+                    status="feedback_persistence_failed",
+                    reason=persistence_reason,
+                )
     outcome = "applied" if all_terminal else "partial_failure"
+    summary_comment = _render_execution_summary(
+        execution_results, unknown_ids, selected_ids
+    )
+    if persistence_reason:
+        summary_comment += "\n\n" + persistence_reason
+    try:
+        _publish_execution_summary(
+            review_client,
+            issue_number,
+            summary_comment,
+            advisory_repository=apply_context.advisory_repo,
+        )
+    except Exception:
+        return {
+            "outcome": "partial_failure",
+            "issue": issue_number,
+            "reason": "Could not persist execution summary; no applied label was added",
+            "groups": execution_results,
+            "selected_action_ids": selected_ids,
+            "unknown_checked_action_ids": unknown_ids,
+        }
+    if has_feedback:
+        try:
+            if REVIEW_FEEDBACK_LABEL not in issue.labels:
+                review_client.ensure_label_exists(
+                    REVIEW_FEEDBACK_LABEL,
+                    color="5319e7",
+                    description="Internal index of confirmed security-triage reviewer feedback",
+                )
+                review_client.add_labels(issue_number, [REVIEW_FEEDBACK_LABEL])
+        except Exception:
+            all_terminal = False
+            outcome = "partial_failure"
+            persistence_reason = "Could not persist the trusted feedback index label; retry is safe and no applied label was added"
+            try:
+                _publish_execution_summary(
+                    review_client,
+                    issue_number,
+                    summary_comment + "\n\n" + persistence_reason,
+                    advisory_repository=apply_context.advisory_repo,
+                )
+            except Exception:
+                pass
     if all_terminal:
-        summary_action_id = f"applied-summary-{manifest['part_id']}"
-        summary_comment = _render_execution_summary(execution_results, unknown_ids)
-        if not _has_marker_comment(
-            review_client.list_comments(issue_number), summary_action_id
-        ):
-            review_client.post_comment(
-                issue_number, _with_action_marker(summary_comment, summary_action_id)
-            )
         if REVIEW_APPLIED_LABEL not in issue.labels:
-            review_client.ensure_label_exists(
-                REVIEW_APPLIED_LABEL,
-                color="0e8a16",
-                description="Security-triage review actions have been applied",
-            )
-            review_client.add_labels(issue_number, [REVIEW_APPLIED_LABEL])
+            try:
+                review_client.ensure_label_exists(
+                    REVIEW_APPLIED_LABEL,
+                    color="0e8a16",
+                    description="Security-triage review actions have been applied",
+                )
+                review_client.add_labels(issue_number, [REVIEW_APPLIED_LABEL])
+            except Exception:
+                outcome = "partial_failure"
+                try:
+                    _publish_execution_summary(
+                        review_client,
+                        issue_number,
+                        summary_comment
+                        + "\n\nCould not persist the applied label; retry is safe.",
+                        advisory_repository=apply_context.advisory_repo,
+                    )
+                except Exception:
+                    pass
 
     return {
         "outcome": outcome,
-        "reason": None,
+        "reason": persistence_reason,
         "issue": issue_number,
         "unknown_checked_action_ids": unknown_ids,
+        "selected_action_ids": selected_ids,
         "groups": execution_results,
     }

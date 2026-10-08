@@ -4,10 +4,15 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from security_triage.models import (
+    CLEANUP_SYSTEM_PROMPT,
     DEFAULT_ENDPOINT,
     DEFAULT_FOUNDRY_API_VERSION,
     DEFAULT_FOUNDRY_DEPLOYMENT,
     DEFAULT_MODEL,
+    EXTRACTION_SYSTEM_PROMPT,
+    ISSUE_NORMALIZATION_SYSTEM_PROMPT,
+    RELEVANCE_SYSTEM_PROMPT,
+    UNTRUSTED_DATA_RULES,
     BaseModelClient,
     FoundryModelsClient,
     GitHubModelsClient,
@@ -15,7 +20,7 @@ from security_triage.models import (
     ModelConfigError,
     RoutingModelClient,
 )
-from security_triage.records import Issue
+from security_triage.records import Issue, SourceEntry
 from security_triage.rules import (
     coerce_cleanup_review,
     coerce_discovery_decision,
@@ -31,6 +36,52 @@ from security_triage.sources import (
     source_entry_from_mapping,
 )
 from security_triage.time_utils import in_window, parse_datetime
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        EXTRACTION_SYSTEM_PROMPT,
+        RELEVANCE_SYSTEM_PROMPT,
+        ISSUE_NORMALIZATION_SYSTEM_PROMPT,
+        CLEANUP_SYSTEM_PROMPT,
+    ],
+)
+def test_all_reasoning_prompts_keep_untrusted_source_boundary(prompt):
+    assert UNTRUSTED_DATA_RULES in prompt
+
+
+def test_extraction_contract_requires_source_evidence_and_confidence_dimensions(
+    monkeypatch,
+):
+    captured = {}
+
+    def complete(self, purpose, system, user):
+        captured.update(user)
+        return {"package_name": "expat"}
+
+    monkeypatch.setattr(GitHubModelsClient, "_complete_json", complete)
+    GitHubModelsClient(token="test-token").extract_advisory(
+        SourceEntry(
+            "gentoo",
+            "https://bugs.gentoo.org/1",
+            "1",
+            "expat",
+            "expat",
+        )
+    )
+    schema = captured["required_output"]
+    assert set(schema["confidence_dimensions"]) == {
+        "identity",
+        "scope",
+        "source_extraction",
+        "affectedness",
+        "remediation",
+    }
+    assert "source_url" in schema["field_evidence"]["fixed_versions"][0]
+    assert "quote" in schema["field_evidence"]["fixed_versions"][0]
+    assert "concrete source-backed" in schema["action_needed"]
+    assert schema["fixed_version_semantics"].startswith("and|or|unknown")
 
 
 def test_parse_rss_feed_source_entry():

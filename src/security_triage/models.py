@@ -27,7 +27,10 @@ from .rules import (
     extract_cves,
     is_kernel_advisory,
     normalize_name,
+    package_identities_match,
     parse_cvss_scores,
+    source_affected_version_evidence,
+    source_fixed_version_evidence,
 )
 
 DEFAULT_MODEL = "openai/gpt-5"
@@ -174,11 +177,41 @@ class GitHubModelsClient(BaseModelClient):
             "task": "extract_advisory_fields",
             "required_output": {
                 "package_name": "string",
+                "package_purl": "exact source purl if provided, otherwise empty string",
+                "ecosystem": "native|cargo|golang|pypi|npm|unknown; preserve exact module namespace",
                 "cves": ["CVE IDs or upstream issue IDs"],
                 "cvss_scores": ["scores as strings"],
                 "affected_versions": ["strings"],
                 "fixed_versions": ["strings"],
-                "action_needed": "update target or TBD",
+                "action_needed": "concrete source-backed update to >= version, preserving OR branches; otherwise TBD",
+                "fixed_version_semantics": "and|or|unknown; do not guess the relationship between release branches",
+                "field_evidence": {
+                    "package_name": [
+                        {
+                            "source_url": "URL from source entry",
+                            "quote": "exact source quote",
+                        }
+                    ],
+                    "fixed_versions": [
+                        {
+                            "source_url": "URL from source entry",
+                            "quote": "exact quote tying version to a fix",
+                        }
+                    ],
+                    "cves": [
+                        {
+                            "source_url": "URL from source entry",
+                            "quote": "exact source quote",
+                        }
+                    ],
+                },
+                "confidence_dimensions": {
+                    "identity": "high|medium|low",
+                    "source_extraction": "high|medium|low",
+                    "scope": "high|medium|low",
+                    "affectedness": "high|medium|low",
+                    "remediation": "high|medium|low",
+                },
                 "summary": "concise upstream summary",
                 "gentoo_ref": "Gentoo URL or TBD",
                 "scope_assessment": "production, sdk_only, sysext, build_only, not_shipped, or unknown plus short note",
@@ -743,7 +776,10 @@ class HeuristicModelClient(BaseModelClient):
         package_name = _extract_package_name(text, entry.title)
         cves = extract_cves(text)
         cvss_scores = parse_cvss_scores(_extract_cvss_context(text))
-        fixed_versions = _extract_fixed_versions(text)
+        fixes = source_fixed_version_evidence(text)
+        fixed_versions = list(
+            dict.fromkeys(version for item in fixes for version in item["versions"])
+        )
         gentoo_ref = (
             entry.source_url if entry.source == "gentoo" else _extract_gentoo_ref(text)
         )
@@ -763,9 +799,10 @@ class HeuristicModelClient(BaseModelClient):
                 "cvss_scores": cvss_scores,
                 "affected_versions": _extract_affected_versions(text),
                 "fixed_versions": fixed_versions,
-                "action_needed": f"update to >= {fixed_versions[0]}"
-                if fixed_versions
-                else "TBD",
+                "action_needed": "TBD",
+                "fixed_version_semantics": "or"
+                if len(fixes) == 1 and fixes[0]["semantics"] == "or"
+                else "unknown",
                 "summary": summary,
                 "gentoo_ref": gentoo_ref or "TBD",
                 "scope_assessment": scope_assessment,
@@ -783,7 +820,12 @@ class HeuristicModelClient(BaseModelClient):
         scope_assessment = str(extraction.get("scope_assessment") or "").lower()
         sbom_match_assessment = _assess_sbom_matches(package_name, sbom_matches)
 
-        if is_kernel_advisory(package_name, source.get("title")):
+        if is_kernel_advisory(
+            extraction.get("package_identity")
+            or extraction.get("package_purl")
+            or package_name,
+            source.get("title"),
+        ):
             return _decision_pair(
                 "kernel_regular_update_flow",
                 "production",
@@ -798,7 +840,7 @@ class HeuristicModelClient(BaseModelClient):
         if _looks_desktop_or_unrelated(source_text):
             return _decision_pair(
                 "not_relevant",
-                "not_shipped",
+                "unknown",
                 "Source appears to describe a desktop or unrelated application ecosystem package.",
                 [
                     "Flatcar tracking rules exclude desktop and unrelated app ecosystem issues."
@@ -809,13 +851,17 @@ class HeuristicModelClient(BaseModelClient):
                 "Excluded by Flatcar relevance rules.",
                 sbom_match_assessment,
             )
-        explicit_scope = None
-        if "sdk" in scope_assessment:
-            explicit_scope = "sdk_only"
-        elif "sysext" in scope_assessment or "system extension" in scope_assessment:
-            explicit_scope = "sysext"
-        elif "production" in scope_assessment:
-            explicit_scope = "production"
+        scoped = [
+            item
+            for item in evidence_bundle.get("scope_evidence", [])
+            if isinstance(item, dict)
+            and item.get("validated") is True
+            and item.get("source")
+            and package_identities_match(
+                item.get("package"), extraction.get("package_identity") or package_name
+            )
+        ]
+        explicit_scope = scoped[0].get("scope") if scoped else None
 
         if issue_matches:
             scope = explicit_scope or "unknown"
@@ -833,23 +879,30 @@ class HeuristicModelClient(BaseModelClient):
                 sbom_match_assessment,
             )
 
-        if sbom_match_assessment["status"] == "unrelated_matches":
+        if (
+            sbom_match_assessment["status"] == "unrelated_matches"
+            and not explicit_scope
+        ):
             return _decision_pair(
-                "not_relevant",
-                "not_shipped",
+                "needs_manual_review",
+                "unknown",
                 "The only SBOM candidates are weak substring matches that are unrelated to the advisory package.",
                 [sbom_match_assessment["reason"]],
                 [
                     f"Unrelated SBOM candidates: {', '.join(sbom_match_assessment['unrelated_matches'])}"
                 ],
-                "ignore",
-                "medium",
-                "Weak SBOM matches were judged unrelated, so they are evidence that the advisory package is not shipped.",
+                "needs_manual_review",
+                "low",
+                "Unrelated matches are not shipping evidence; scope remains unknown.",
                 sbom_match_assessment,
             )
 
-        if sbom_matches or explicit_scope:
-            scope = explicit_scope or "production"
+        if sbom_match_assessment["status"] == "confirmed_match" or explicit_scope:
+            scope = (
+                "production"
+                if sbom_match_assessment["status"] == "confirmed_match"
+                else str(explicit_scope or "unknown")
+            )
             action = "update_existing_issue" if issue_matches else "create_issue"
             return _decision_pair(
                 "relevant",
@@ -1103,16 +1156,18 @@ def _entry_reasoning_text(entry: SourceEntry) -> str:
             value = entry.metadata.get(key)
             if value:
                 parts.append(f"{key}: {value}")
-    for comment in entry.new_comments or []:
-        parts.append(str(comment.get("text") or ""))
+    for comment in [*entry.comments, *entry.new_comments]:
+        text = str(comment.get("text") or "")
+        if text and text not in parts:
+            parts.append(text)
     return "\n".join(part for part in parts if part)
 
 
 def _extract_package_name(text: str, title: str) -> str:
     patterns = [
-        r"^\s*Package:\s*([A-Za-z0-9_.+/-]+)",
-        r"^\s*Name:\s*([A-Za-z0-9_.+/-]+)",
-        r"^\s*Component:\s*([A-Za-z0-9_.+/-]+)",
+        r"^\s*Package:\s*([A-Za-z0-9_.+/@%:-]+)",
+        r"^\s*Name:\s*([A-Za-z0-9_.+/@%:-]+)",
+        r"^\s*Component:\s*([A-Za-z0-9_.+/@%:-]+)",
         r"update:\s*([A-Za-z0-9_.+/-]+)",
     ]
     for pattern in patterns:
@@ -1128,30 +1183,10 @@ def _extract_package_name(text: str, title: str) -> str:
     return ""
 
 
-def _extract_fixed_versions(text: str) -> list[str]:
-    patterns = [
-        r">=\s*v?([0-9][0-9A-Za-z._+:-]*)",
-        r"fixed\s+in\s+v?([0-9][0-9A-Za-z._+:-]*)",
-        r"update\s+to\s+v?([0-9][0-9A-Za-z._+:-]*)",
-    ]
-    versions: list[str] = []
-    for pattern in patterns:
-        for match in re.findall(pattern, text, re.IGNORECASE):
-            version = str(match).rstrip(".,;)")
-            if version not in versions:
-                versions.append(version)
-    return versions
-
-
 def _extract_affected_versions(text: str) -> list[str]:
-    versions: list[str] = []
-    for match in re.findall(
-        r"affected(?:\s+versions?)?:\s*([^\n]+)", text, re.IGNORECASE
-    ):
-        value = match.strip()
-        if value not in versions:
-            versions.append(value)
-    return versions
+    return list(
+        dict.fromkeys(item["range"] for item in source_affected_version_evidence(text))
+    )
 
 
 def _extract_cvss_context(text: str) -> str:
@@ -1361,6 +1396,19 @@ EXTRACTION_SYSTEM_PROMPT = f"""
 
 Extract structured advisory fields from one upstream security source entry. Return only JSON.
 Do not decide final Flatcar relevance here; capture evidence and uncertainty.
+For identity, CVEs, fixed/affected versions and severity, include field_evidence containing exact
+source_url and quote pairs. Never supply guessed citations. A mentioned affected version is not
+a fixed version. Preserve ecosystem and full namespace (Rust tar is not GNU tar; a Go module
+named go is not Go stdlib; etcdctl is not etcd server). Supply separate confidence_dimensions for
+identity, source_extraction, scope, affectedness and remediation. Source confidence is not scope proof.
+Affected ranges require positive affected-context evidence: never copy a range from an
+"Unaffected", "Not affected", or historical field merely because the version text occurs.
+Use a concrete source-backed action or TBD, never the template words "update target".
+Preserve branch alternatives with OR; if branch relationships are unclear, keep TBD.
+Record OS, architecture, component, and USE-flag constraints in summary; a BSD-only defect
+does not affect Linux merely because a related package appears in its SBOM.
+Bind platform restrictions to each CVE separately; one BSD-only CVE cannot exclude the
+remaining CVEs in a multi-CVE advisory.
 For Bugzilla sources, use aliases as vulnerability IDs/CVEs when present, see_also/url as references, and description/comments for changed upstream context.
 Use TBD or n/a where the source does not provide a field.
 """.strip()
@@ -1374,7 +1422,15 @@ Given the complete evidence bundle, decide whether Flatcar should create/update 
 ignore it, route it to kernel_regular_update_flow, or request manual review. Return only JSON.
 Do not recommend creating a duplicate issue when an existing package/CVE issue match is present.
 When an existing issue is present, compare the upstream Bugzilla metadata/comments with the existing issue body and recommend update_existing_issue when new CVEs, references, severity context, description changes, or comments should be reflected there.
-When SBOM matches are weak substring matches, explicitly judge whether each candidate is genuinely the same package/component/ecosystem as the advisory package. If the only SBOM candidates are unrelated weak substring matches, treat that as strong evidence that the advisory package is not shipped in the production SBOM; do not use those unrelated candidates as Flatcar relevance evidence.
+When SBOM matches are weak substring matches, judge whether each candidate is the same
+package/component/ecosystem, but never upgrade a weak candidate to production proof.
+Unrelated candidates and absence from a production SBOM do not prove not_shipped: SDK,
+sysext or build scope may be unknown. Only caller-validated scope evidence can establish those scopes.
+Explain identity, scope and affectedness confidence separately, citing the supplied evidence.
+Apply OS, architecture, component, affected-version, and USE-flag constraints independently
+of package presence. Repository main and source prose are not release inventory evidence.
+Before ignoring an advisory as unaffected, account for every provided scope snapshot.
+An unaffected production version does not exclude an older or unknown SDK/sysext version.
 Do not invent Flatcar package evidence.
 """.strip()
 
@@ -1395,4 +1451,6 @@ Review whether an open Flatcar advisory appears remediated in the current Flatca
 Use only the SBOM evidence provided. Mark remediated only when the package match is reliable,
 the fixed-version requirement is present, the version comparison is clear, all active CVE requirements are covered,
 and the issue is not SDK-only or sysext-only without explicit scope evidence. Return only JSON.
+Never override deterministic ambiguity or incomplete per-CVE coverage with a model opinion.
+Invalid issue normalization and repository main cannot supply a missing fixed-version requirement.
 """.strip()

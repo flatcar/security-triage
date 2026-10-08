@@ -47,6 +47,11 @@ class ParsedIssue:
     gentoo_ref: str | None
     valid: bool
     missing_fields: list[str] = field(default_factory=list)
+    package_identity: str | None = None
+
+    @property
+    def identity(self) -> str | None:
+        return self.package_identity if self.package_identity is not None else self.name
 
 
 @dataclass(slots=True)

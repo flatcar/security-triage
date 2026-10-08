@@ -192,14 +192,35 @@ def test_apply_workflow_permissions_are_least_privilege_with_no_oidc():
     assert "id-token" not in permissions
 
 
-def test_apply_workflow_concurrency_is_scoped_to_the_issue_and_never_cancels():
+def test_apply_workflow_serializes_all_parts_and_never_cancels_active_apply():
     document = _load(APPLY_WORKFLOW_PATH)
     concurrency = document["concurrency"]
 
     assert concurrency["cancel-in-progress"] is False
-    assert (
-        "issue.number" in concurrency["group"] or "issue_number" in concurrency["group"]
-    )
+    assert "github.repository" in concurrency["group"]
+    assert "issue.number" not in concurrency["group"]
+    assert "issue_number" not in concurrency["group"]
+
+
+def test_scheduled_reviews_keep_collection_but_allow_explicit_source_deferral():
+    document = _load(SCHEDULED_WORKFLOW_PATH)
+    commands = _all_run_steps(document)
+    discovery = next(c for c in commands if "security-triage discovery" in c)
+    review = next(c for c in commands if "security-triage review create" in c)
+    assert "--feedback-review-repo" in discovery
+    assert "--go-review" not in discovery
+    assert "--rust-review" not in discovery
+    assert '--go-review "$GO_REVIEW"' in review
+    assert '--rust-review "$RUST_REVIEW"' in review
+    assert '--review-detail "$REVIEW_DETAIL"' in review
+    assert "--enable-feedback" in review
+    assert "--cleanup-json" not in review
+    assert "|| 'include'" in document["env"]["GO_REVIEW"]
+    assert "|| 'include'" in document["env"]["RUST_REVIEW"]
+    assert "|| 'full'" in document["env"]["REVIEW_DETAIL"]
+    shadow = next(c for c in commands if "security-triage review render" in c)
+    assert "--review-detail compact" in shadow
+    assert "--output-dir reports/review-shadow" in shadow
 
 
 def test_apply_workflow_job_is_filtered_by_the_review_label():

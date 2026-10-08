@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from urllib.parse import unquote
+
+from .records import SourceEntry
 
 SCHEMA_VERSION = "1.0"
-PROMPT_VERSION = "security-triage-2026-04-29"
+PROMPT_VERSION = "security-triage-2026-10-07-evidence"
 TARGET_REPO = "flatcar/Flatcar"
 FLATCAR_PRODUCTION_SBOM_URL = "https://alpha.release.flatcar-linux.net/amd64-usr/current/flatcar_production_image_sbom.json"
 REVIEW_LABEL = "security-triage/review"
@@ -68,12 +71,20 @@ _MENTION_RE = re.compile(
 )
 _CVSS_RE = re.compile(r"(?<!\d)(10(?:\.0)?|[0-9](?:\.\d)?)(?!\d)")
 _KERNEL_RE = re.compile(
-    r"\b(linux-kernel|kernel|sys-kernel|kernel-cve)\b", re.IGNORECASE
+    r"\b(?:linux[-\s]+kernel|gentoo[-\s]+kernel|"
+    r"sys-kernel/(?:gentoo-kernel(?:-bin)?|gentoo-sources|vanilla-sources))\b",
+    re.IGNORECASE,
 )
 _STRIKETHROUGH_RE = re.compile(r"(?:~~.*?~~|~[^~]*~)", re.DOTALL)
 _OWNER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$")
 _REPO_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _REPO_FORBIDDEN_CHARS = frozenset(" \t\r\n?#@\\\"'<>|*")
+_GENTOO_CATEGORIES = frozenset(
+    "app-admin app-arch app-containers app-crypt app-editors app-emulation app-misc "
+    "app-shells dev-db dev-lang dev-libs dev-python dev-util net-analyzer net-dialup "
+    "net-dns net-firewall net-libs net-misc sys-apps sys-auth sys-block sys-boot "
+    "sys-cluster sys-devel sys-fs sys-kernel sys-libs sys-process virtual".split()
+)
 
 
 class SchemaValidationError(ValueError):
@@ -235,6 +246,113 @@ def normalize_name(value: str | None) -> str:
     return re.sub(r"[^a-z0-9.+_-]+", "-", text).strip("-")
 
 
+def package_identity(value: str | None) -> str:
+    """Canonical identity, never an arbitrary namespace's final path component."""
+    text = (value or "").strip()
+    if not text:
+        return ""
+    if text.lower().startswith("pkg:"):
+        locator = text[4:].split("#", 1)[0].split("?", 1)[0].split("@", 1)[0]
+        ecosystem, separator, path = locator.partition("/")
+        if not separator or not path:
+            return ""
+        ecosystem = ecosystem.lower()
+        path = unquote(path)
+        if ecosystem in {"gentoo", "pypi", "cargo"}:
+            path = path.lower()
+        text = f"pkg:{ecosystem}/{path}"
+    elif "/" in text:
+        category, _, _name = text.partition("/")
+        if category.lower() in _GENTOO_CATEGORIES and text.count("/") == 1:
+            text = f"pkg:gentoo/{text.lower()}"
+        elif re.match(
+            r"^(?:github\.com|go\.etcd\.io|golang\.org|go\.opentelemetry\.io)/", text
+        ):
+            text = f"pkg:golang/{text}"
+    else:
+        text = text.lower()
+    if text in {"cpython", "python", "pkg:gentoo/dev-lang/python"}:
+        return "python"
+    return text
+
+
+def package_identities_match(left: str | None, right: str | None) -> bool:
+    left_id, right_id = package_identity(left), package_identity(right)
+    if not left_id or not right_id:
+        return False
+    if left_id == right_id:
+        return True
+    # A native unqualified name may be the short name of a Gentoo atom, not of
+    # Cargo, Go, npm, or an arbitrary repository path.
+    for native, qualified in ((left_id, right_id), (right_id, left_id)):
+        if (
+            "/" not in native
+            and ":" not in native
+            and qualified.startswith("pkg:gentoo/")
+        ):
+            atom = qualified.removeprefix("pkg:gentoo/")
+            category, _, name = atom.partition("/")
+            if category in _GENTOO_CATEGORIES and "/" not in name and native == name:
+                return True
+    return False
+
+
+def canonical_identity_note(identity: str | None, name: str | None) -> str:
+    """Persist a qualified identity without changing the manual advisory fields."""
+    canonical = package_identity(identity)
+    if not canonical or canonical == package_identity(name):
+        return ""
+    if (
+        len(canonical) > 512
+        or not re.fullmatch(r"(?:pkg:[a-z0-9.+-]+/)?[A-Za-z0-9._~+%/-]+", canonical)
+        or "/" not in canonical
+        or not (
+            package_identities_match(canonical, name)
+            or package_identity(name)
+            in {canonical.partition("/")[2], canonical.rsplit("/", 1)[-1]}
+        )
+    ):
+        raise ValueError("Canonical package identity conflicts with the advisory name")
+    return f"Note: Canonical package identity: `{canonical}`."
+
+
+def issue_identity_from_summary(name: str | None, summary: str | None) -> str | None:
+    """None means legacy name-only; an empty string marks conflicting identity."""
+    text = summary or ""
+    marker = "canonical package identity"
+    if marker not in text.casefold():
+        # Legacy bare names with explicit foreign-ecosystem context are
+        # ambiguous, not authority to mutate a similarly named native package.
+        if "/" not in (name or "") and (
+            re.search(
+                r"\b(?:rust crate|cargo package|go module)\b", text, re.IGNORECASE
+            )
+            or "rustsec.org/advisories/" in text.casefold()
+            or any(
+                not package_identities_match(name, purl)
+                and package_identity(purl).rsplit("/", 1)[-1] == package_identity(name)
+                for purl in re.findall(r"\bpkg:[a-z0-9.+-]+/[^\s`<>]+", text)
+            )
+        ):
+            return ""
+        return None
+    matches = re.findall(
+        r"Note: Canonical package identity: `([^`\r\n]{1,512})`\.",
+        text,
+        re.IGNORECASE,
+    )
+    if len(matches) != 1 or text.casefold().count(marker) != 1:
+        return ""
+    identity = str(matches[0])
+    if identity != package_identity(identity) or "/" not in identity:
+        return ""
+    try:
+        canonical_identity_note(identity, name)
+    except ValueError:
+        return ""
+    return identity
+
+
 def parse_cvss_scores(values: list[Any] | str | None) -> list[str]:
     if values is None:
         return []
@@ -335,16 +453,25 @@ def is_kernel_advisory(package_name: str | None, title: str | None = None) -> bo
     kernel identifiers in the package name and title.
     """
 
-    text = " ".join(part for part in [package_name, title] if part)
-    if not text:
+    identity = package_identity(package_name)
+    if identity.startswith("pkg:gentoo/sys-kernel/"):
+        return identity.rsplit("/", 1)[-1] in {
+            "gentoo-kernel",
+            "gentoo-kernel-bin",
+            "gentoo-sources",
+            "vanilla-sources",
+        }
+    if identity.startswith("pkg:") or "/" in identity:
         return False
-    normalized = normalize_name(package_name)
-    return normalized in {
+    if identity in {
         "kernel",
         "linux-kernel",
         "sys-kernel",
         "gentoo-kernel",
-    } or bool(_KERNEL_RE.search(text))
+    }:
+        return True
+    # A known userspace identity takes precedence over incidental title prose.
+    return identity in {"", "linux"} and bool(_KERNEL_RE.search(title or ""))
 
 
 def coerce_confidence(value: Any, default: str = "low") -> str:
@@ -371,9 +498,11 @@ def coerce_extraction(data: dict[str, Any] | None) -> dict[str, Any]:
         for item in source.get("fixed_versions", [])
         if str(item).strip()
     ]
-    action_needed = sanitize_single_line(str(source.get("action_needed") or "")) or None
-    if not action_needed and fixed_versions:
-        action_needed = f"update to >= {fixed_versions[0]}"
+    action_needed = normalize_action_needed(
+        source.get("action_needed"),
+        fixed_versions,
+        source.get("fixed_version_semantics"),
+    )
     return {
         "package_name": sanitize_single_line(str(source.get("package_name") or ""))[
             :MAX_PACKAGE_NAME_LENGTH
@@ -386,6 +515,36 @@ def coerce_extraction(data: dict[str, Any] | None) -> dict[str, Any]:
             if str(item).strip()
         ],
         "fixed_versions": fixed_versions,
+        "fixed_version_semantics": str(
+            source.get("fixed_version_semantics") or "unknown"
+        ),
+        "package_purl": str(source.get("package_purl") or ""),
+        "package_identity": package_identity(
+            str(source.get("package_purl") or source.get("package_name") or "")
+        ),
+        "ecosystem": str(source.get("ecosystem") or "unknown"),
+        "field_evidence": source.get("field_evidence")
+        if isinstance(source.get("field_evidence"), dict)
+        else {},
+        "confidence_dimensions": {
+            field: coerce_confidence(
+                (source.get("confidence_dimensions") or {}).get(field)
+            )
+            for field in (
+                "identity",
+                "source_extraction",
+                "scope",
+                "affectedness",
+                "remediation",
+            )
+        }
+        if isinstance(source.get("confidence_dimensions", {}), dict)
+        else {},
+        **(
+            {"evidence_validation": source["evidence_validation"]}
+            if isinstance(source.get("evidence_validation"), dict)
+            else {}
+        ),
         "action_needed": truncate_text(
             neutralize_mentions(action_needed or "TBD"), MAX_ACTION_NEEDED_LENGTH
         ),
@@ -400,6 +559,365 @@ def coerce_extraction(data: dict[str, Any] | None) -> dict[str, Any]:
         )[:MAX_GENTOO_REF_LENGTH],
         "scope_assessment": str(source.get("scope_assessment") or "unknown").strip(),
         "confidence": coerce_confidence(source.get("confidence")),
+    }
+
+
+def normalize_action_needed(
+    action: Any, fixed_versions: list[str], semantics: Any = None
+) -> str:
+    text = sanitize_single_line(str(action or ""))
+    template = bool(
+        re.search(
+            r"(?:update\s+target|<[^>]+>|\bstring\s+or\s+null\b)", text, re.IGNORECASE
+        )
+    )
+    if text and text.upper() not in {"TBD", "N/A", "UNKNOWN"} and not template:
+        return text
+    from .sbom import compare_simple_versions, highest_fixed_version_requirement
+
+    if not fixed_versions or any(
+        compare_simple_versions(version, version).result == "ambiguous"
+        for version in fixed_versions
+    ):
+        return "TBD"
+    versions = list(dict.fromkeys(fixed_versions))
+    if len(versions) == 1:
+        return f"update to >= {versions[0]}"
+    if semantics == "or":
+        return "update to " + " or ".join(f">= {version}" for version in versions)
+    if semantics == "and":
+        highest = highest_fixed_version_requirement(versions)
+        return f"update to >= {highest}" if highest else "TBD"
+    return "TBD"
+
+
+def source_fixed_version_evidence(text: str) -> list[dict[str, Any]]:
+    version = r"v?[0-9][0-9A-Za-z._+:-]*"
+    pattern = (
+        r"(?:\bfixed\s+(?:in|versions?\s*:?)|\bfix(?:ed)?\s*:\s*|"
+        r"\b(?:update|upgrade)\s+to|\bresolved\s+in)\s*(?:>=\s*)?"
+        rf"({version}(?:\s*(?:,|;|\band\b|\bor\b)\s*(?:>=\s*)?{version})*)"
+    )
+    evidence = []
+    for match in re.finditer(pattern, text, re.IGNORECASE):
+        if re.search(
+            r"\b(?:not|never)\s+$",
+            text[max(0, match.start() - 16) : match.start()],
+            re.IGNORECASE,
+        ):
+            continue
+        versions = [
+            value.removeprefix("v").rstrip(".,;)")
+            for value in re.findall(version, match.group(1))
+        ]
+        evidence.append(
+            {
+                "versions": versions,
+                "semantics": "or"
+                if re.search(r"\bor\b", match.group(1), re.IGNORECASE)
+                else "unknown",
+                "quote": match.group(0),
+            }
+        )
+    return evidence
+
+
+def source_affected_version_evidence(text: str) -> list[dict[str, str]]:
+    """Recognize positive affected-range fields, never unaffected/negated prose."""
+    pattern = (
+        r"^\s*(?:[-*]\s+)?(?:\*\*)?"
+        r"(?:affected|vulnerable)(?:\s+versions?)?(?:\*\*)?\s*:\s*([^\n]+)"
+    )
+    return [
+        {"range": match.group(1).strip(), "quote": match.group(0).strip()}
+        for match in re.finditer(pattern, text, re.IGNORECASE | re.MULTILINE)
+    ]
+
+
+def validate_extraction_evidence(
+    extraction: dict[str, Any], entry: SourceEntry
+) -> dict[str, Any]:
+    """Revalidate model claims at the workflow boundary, including fixture clients.
+
+    Quotes prove source attribution, not truth or Flatcar shipping/scope. Missing
+    legacy citations can be grounded by exact source tokens, but never by model
+    prose or a model-supplied ``validated`` flag.
+    """
+    result = coerce_extraction(extraction)
+    source_text = "\n".join(
+        [
+            entry.title,
+            entry.content,
+            entry.description or "",
+            *[str(comment.get("text") or "") for comment in entry.comments],
+            *[str(comment.get("text") or "") for comment in entry.new_comments],
+            *[str(alias) for alias in entry.metadata.get("alias", [])],
+        ]
+    )
+    sources = {entry.source_url, *entry.references}
+    errors: list[str] = []
+    evidence = result["field_evidence"]
+    for field, citations in evidence.items():
+        if not isinstance(citations, list) or not citations:
+            errors.append(f"Invalid source citations for {field}.")
+            continue
+        for citation in citations:
+            if (
+                not isinstance(citation, dict)
+                or not isinstance(citation.get("source_url"), str)
+                or citation.get("source_url") not in sources
+                or not isinstance(citation.get("quote"), str)
+                or not citation["quote"].strip()
+                or citation["quote"] not in source_text
+            ):
+                errors.append(f"Unverifiable source citation for {field}.")
+                break
+
+    def present(value: str) -> bool:
+        return bool(
+            value
+            and re.search(
+                rf"(?<![\w.+/-]){re.escape(value)}(?![\w.+/-])",
+                source_text,
+                re.IGNORECASE,
+            )
+        )
+
+    name = result["package_name"]
+    if not present(name):
+        if not (
+            package_identity(name) == "python"
+            and re.search(
+                r"\b(?:cpython|python|dev-lang/python)\b", source_text, re.IGNORECASE
+            )
+        ):
+            errors.append("Package identity is not grounded in the source.")
+    for cve in result["cves"]:
+        if not present(cve):
+            errors.append(f"Unsupported cves value: {cve}")
+    affected_ranges = {
+        " ".join(item["range"].split()).casefold()
+        for item in source_affected_version_evidence(source_text)
+    }
+    for affected_range in result["affected_versions"]:
+        if " ".join(affected_range.split()).casefold() not in affected_ranges:
+            errors.append(
+                f"Affected range has no positive affected-context source evidence: {affected_range}"
+            )
+    if result["affected_versions"] and affected_ranges - {
+        " ".join(value.split()).casefold() for value in result["affected_versions"]
+    }:
+        errors.append("Source affected-range coverage is incomplete.")
+    omitted_cves = sorted(set(extract_cves(source_text)) - set(result["cves"]))
+    if omitted_cves:
+        errors.append(
+            f"Source CVE coverage is incomplete; omitted: {', '.join(omitted_cves)}"
+        )
+    if set(extract_cves(result["summary"])) - set(extract_cves(source_text)):
+        errors.append("Summary introduces CVEs not present in the source.")
+    for url in re.findall(r"https?://[^\s<>]+", result["summary"]):
+        url = url.rstrip(".,;)")
+        if url not in sources and url not in source_text:
+            errors.append("Summary introduces a URL not present in the source.")
+    cvss_context = " ".join(
+        re.findall(r"\bCVSS(?:s|\s+score)?\s*:?\s*([^\n]+)", source_text, re.IGNORECASE)
+    )
+    supported_scores = parse_cvss_scores(cvss_context)
+    if any(score not in supported_scores for score in result["cvss_scores"]):
+        errors.append("CVSS scores are not grounded in source severity evidence.")
+    gentoo_ref = result["gentoo_ref"]
+    if gentoo_ref != "TBD" and (
+        not is_gentoo_reference(gentoo_ref)
+        or gentoo_ref not in sources
+        and gentoo_ref not in source_text
+    ):
+        errors.append("Gentoo reference is not grounded in the source.")
+        result["gentoo_ref"] = "TBD"
+    fixes = source_fixed_version_evidence(source_text)
+    supported_fixes = {version for item in fixes for version in item["versions"]}
+    summary_fixes = {
+        version
+        for item in source_fixed_version_evidence(result["summary"])
+        for version in item["versions"]
+    }
+    if summary_fixes - supported_fixes:
+        errors.append("Summary introduces fixed versions not present in the source.")
+    for version in result["fixed_versions"]:
+        if version not in supported_fixes:
+            errors.append(f"Unsupported fixed_versions value: {version}")
+    for item in fixes:
+        if (
+            set(item["versions"]) == set(result["fixed_versions"])
+            and item["semantics"] == "or"
+        ):
+            result["fixed_version_semantics"] = "or"
+    if (
+        result["action_needed"] == "TBD"
+        and result["fixed_versions"]
+        and all(version in supported_fixes for version in result["fixed_versions"])
+    ):
+        result["action_needed"] = normalize_action_needed(
+            "TBD", result["fixed_versions"], result["fixed_version_semantics"]
+        )
+    purl = result["package_purl"]
+    source_identity = _source_package_identity(name, source_text)
+    if purl and (
+        not purl.startswith("pkg:")
+        or not present(purl)
+        and package_identity(purl) != source_identity
+    ):
+        errors.append("Package purl is not grounded in the source.")
+    if purl and not package_identities_match(purl, name):
+        purl_path = package_identity(purl).partition("/")[2]
+        if purl_path != name and purl_path.rsplit("/", 1)[-1] != name:
+            errors.append("Package purl conflicts with the extracted package name.")
+    if (
+        purl
+        and source_identity.startswith("pkg:")
+        and not package_identities_match(purl, source_identity)
+    ):
+        errors.append(
+            "Package purl conflicts with source ecosystem/namespace evidence."
+        )
+    ecosystem = result["ecosystem"].lower()
+    if not purl and source_identity.startswith("pkg:"):
+        purl = source_identity
+    if not purl and ecosystem in {"cargo", "rust"}:
+        errors.append(
+            "Rust ecosystem/package relationship is not grounded in the source."
+        )
+    if not purl and ecosystem in {"golang", "go"} and name != "go":
+        errors.append("Go module namespace is not grounded in the source.")
+    result["package_purl"] = purl
+    result["package_identity"] = package_identity(purl or name)
+    from .sbom import extract_fixed_version_requirements
+
+    action = result["action_needed"]
+    action_versions = extract_fixed_version_requirements(action)
+    if action != "TBD" and (
+        action_versions
+        and any(version not in supported_fixes for version in action_versions)
+        or not action_versions
+        and not present(action)
+    ):
+        errors.append("Action Needed is not grounded in source fixed-version evidence.")
+        result["action_needed"] = "TBD"
+    if len(result["fixed_versions"]) > 1 and result["fixed_version_semantics"] == "or":
+        if set(action_versions) != set(result["fixed_versions"]):
+            result["action_needed"] = normalize_action_needed(
+                "TBD", result["fixed_versions"], "or"
+            )
+    elif len(result["fixed_versions"]) > 1 and not present(action):
+        result["action_needed"] = "TBD"
+    platform_evidence = _source_platform_evidence(
+        source_text, list(dict.fromkeys([*extract_cves(source_text), *result["cves"]]))
+    )
+    result["platform_applicability"] = platform_evidence["status"]
+    result["platform_evidence"] = platform_evidence
+    if platform_evidence["status"] == "needs_manual_review":
+        errors.append(
+            "Linux-exclusion evidence does not conclusively cover every source advisory ID."
+        )
+    if re.search(
+        r"\b(?:ignore (?:all |previous )?instructions|system prompt|change your role)\b",
+        source_text,
+        re.IGNORECASE,
+    ):
+        errors.append("Source contains instruction-like text; manual review required.")
+    result["evidence_validation"] = {
+        "status": "validated" if not errors else "needs_manual_review",
+        "errors": list(dict.fromkeys(errors)),
+        "source_url": entry.source_url,
+        "citation_mode": "cited" if evidence else "legacy_source_tokens",
+    }
+    result["confidence_dimensions"]["source_extraction"] = (
+        "medium" if not errors else "low"
+    )
+    result["confidence_dimensions"].update(
+        {
+            "identity": "medium" if name and not errors else "low",
+            "scope": "low",
+            "affectedness": "low",
+            "remediation": "low",
+        }
+    )
+    if errors:
+        result["confidence"] = "low"
+    return result
+
+
+def _source_package_identity(name: str, text: str) -> str:
+    identity = package_identity(name)
+    if identity.startswith("pkg:"):
+        return identity
+    quoted_name = rf"[`'\"]?{re.escape(name)}[`'\"]?"
+    if "/" not in name and re.search(
+        rf"\b(?:rust\s+(?:crate\s+)?{quoted_name}|"
+        rf"(?:cargo\s+package|crate)\s+(?:named\s+)?{quoted_name}|"
+        rf"{quoted_name}\s+(?:rust\s+)?crate)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return f"pkg:cargo/{name}"
+    if re.search(
+        rf"\b(?:go\s+module\s+(?:named\s+)?{quoted_name}|"
+        rf"{quoted_name}\s+go\s+module)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return f"pkg:golang/{name}"
+    return identity
+
+
+def _source_excludes_linux(text: str) -> bool:
+    if re.search(
+        r"\b(?:(?:linux|flatcar)\s+(?:is\s+)?(?:also\s+)?(?:affected|vulnerable)"
+        r"|affects?\s+(?:also\s+)?(?:linux|flatcar)"
+        r"|(?:all|every)\s+(?:supported\s+)?(?:platforms?|operating\s+systems?))\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return False
+    for sentence in re.split(r"[.!?\n]", text.lower()):
+        if re.fullmatch(
+            r"\s*(?:linux|flatcar)\s+is\s+not\s+affected(?:\s+by\s+this\s+(?:issue|defect|vulnerability))?\s*",
+            sentence,
+        ):
+            return True
+        if re.search(r"\b(?:not|never|linux|flatcar)\b", sentence):
+            continue
+        if re.search(
+            r"\b(?:(?:only\s+affects?|affects?\s+only)\s+"
+            r"(?:freebsd|openbsd|netbsd|windows|macos)|"
+            r"(?:freebsd|openbsd|netbsd|windows|macos)[ -]only\s+"
+            r"(?:vulnerability|defect|issue|bug))\b",
+            sentence,
+        ):
+            return True
+    return False
+
+
+def _source_platform_evidence(text: str, advisory_ids: list[str]) -> dict[str, Any]:
+    covered: set[str] = set()
+    for clause in re.split(r"(?<=[.!?])\s+|\n+", text):
+        ids = list(_CVE_RE.finditer(clause))
+        for index, match in enumerate(ids):
+            end = ids[index + 1].start() if index + 1 < len(ids) else len(clause)
+            if _source_excludes_linux(clause[match.start() : end]):
+                covered.add(match.group(0).upper())
+    global_exclusion = _source_excludes_linux(text)
+    required = set(advisory_ids)
+    if global_exclusion and (len(required) <= 1 or required <= covered):
+        status = "not_affected_linux"
+        covered.update(required)
+    elif global_exclusion or covered:
+        status = "needs_manual_review"
+    else:
+        status = "unknown"
+    return {
+        "status": status,
+        "covered_advisory_ids": sorted(required & covered),
+        "unproven_advisory_ids": sorted(required - covered),
     }
 
 
@@ -459,17 +977,43 @@ def apply_discovery_guardrails(
     sbom_matches: list[dict[str, Any]],
     issue_matches: list[dict[str, Any]],
     source_title: str,
+    scope_evidence: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
     manual_reasons: list[str] = []
     package_name = extraction.get("package_name") or ""
+    validated_scope_entries = [
+        item
+        for item in scope_evidence or []
+        if isinstance(item, dict)
+        and item.get("validated") is True
+        and item.get("scope") in RELEVANCE_SCOPES - {"unknown"}
+        and item.get("source")
+        and package_identities_match(
+            extraction.get("package_identity") or package_name, item.get("package")
+        )
+    ]
     sbom_match_assessment = relevance.get("sbom_match_assessment") or {}
     unrelated_weak_sbom_matches = (
         sbom_match_assessment.get("status") == "unrelated_matches"
         and _only_weak_sbom_matches(sbom_matches)
         and not issue_matches
+        and not validated_scope_entries
     )
 
-    if is_kernel_advisory(package_name, source_title):
+    validation = extraction.get("evidence_validation") or {}
+    if validation.get("status") != "validated" or validation.get("errors"):
+        manual_reasons.extend(
+            validation.get("errors")
+            or [
+                "Source extraction evidence was not validated at the workflow boundary."
+            ]
+        )
+    canonical_identity = (
+        extraction.get("package_identity")
+        or extraction.get("package_purl")
+        or package_name
+    )
+    if not manual_reasons and is_kernel_advisory(canonical_identity, source_title):
         relevance = {
             "status": "kernel_regular_update_flow",
             "scope": "production",
@@ -491,6 +1035,37 @@ def apply_discovery_guardrails(
             [],
         )
 
+    if (
+        decision.get("action") == "kernel_regular_update_flow"
+        or relevance.get("status") == "kernel_regular_update_flow"
+    ):
+        manual_reasons.append(
+            "Source-validated package identity does not identify the Linux kernel; model kernel routing is unsupported."
+        )
+
+    if (extraction.get("evidence_validation") or {}).get(
+        "status"
+    ) == "validated" and extraction.get(
+        "platform_applicability"
+    ) == "not_affected_linux":
+        return (
+            {
+                **relevance,
+                "status": "not_relevant",
+                "scope": "unknown",
+                "reasons": [
+                    *relevance.get("reasons", []),
+                    "Source explicitly limits affected platforms; Linux is not affected.",
+                ],
+            },
+            {
+                "action": "ignore",
+                "confidence": "medium",
+                "reason": "Explicit source platform constraint excludes Linux; package presence is not affectedness.",
+            },
+            [],
+        )
+
     if unrelated_weak_sbom_matches:
         assessment_reason = (
             sbom_match_assessment.get("reason")
@@ -498,8 +1073,8 @@ def apply_discovery_guardrails(
         )
         relevance = {
             **relevance,
-            "status": "not_relevant",
-            "scope": "not_shipped",
+            "status": "needs_manual_review",
+            "scope": "unknown",
             "llm_decision": relevance.get("llm_decision")
             or "Weak SBOM matches are unrelated; no Flatcar package evidence remains.",
             "reasons": [
@@ -509,11 +1084,215 @@ def apply_discovery_guardrails(
             "evidence": [*relevance.get("evidence", []), assessment_reason],
         }
         decision = {
-            "action": "ignore",
-            "confidence": "medium",
-            "reason": "LLM judged the only SBOM matches unrelated; treat this as strong not-shipped evidence.",
+            "action": "needs_manual_review",
+            "confidence": "low",
+            "reason": "Unrelated SBOM matches do not prove not_shipped; scope evidence is missing.",
         }
 
+    exact_matches = [
+        match
+        for match in sbom_matches
+        if match.get("match_type") in {"exact_name", "exact_purl"}
+    ]
+    trusted_scopes = {item["scope"] for item in validated_scope_entries}
+    if trusted_scopes:
+        scope = next(
+            (
+                value
+                for value in (
+                    "sdk_only",
+                    "sysext",
+                    "build_only",
+                    "production",
+                    "not_shipped",
+                )
+                if value in trusted_scopes
+            ),
+            "unknown",
+        )
+        if exact_matches:
+            scope = "production"
+            if any(
+                not item.get("discovery_only")
+                and item["scope"] in {"sdk_only", "build_only"}
+                for item in validated_scope_entries
+            ):
+                manual_reasons.append(
+                    "Exclusive SDK/build scope assertion conflicts with reliable production package evidence."
+                )
+        confirmed_scopes = set(trusted_scopes)
+        if scope == "production":
+            confirmed_scopes -= {"sdk_only", "build_only"}
+            confirmed_scopes.add("production")
+        relevance = {
+            **relevance,
+            "scope": scope,
+            "scope_evidence": validated_scope_entries,
+            "confirmed_scopes": sorted(confirmed_scopes),
+        }
+        if "not_shipped" in trusted_scopes and (
+            exact_matches or len(trusted_scopes) > 1
+        ):
+            manual_reasons.append(
+                "Validated not-shipped scope conflicts with package presence or other scopes."
+            )
+    elif exact_matches:
+        relevance = {
+            **relevance,
+            "scope": "production",
+            "confirmed_scopes": ["production"],
+        }
+    elif relevance.get("scope") in {
+        "production",
+        "sdk_only",
+        "sysext",
+        "build_only",
+        "not_shipped",
+    }:
+        relevance = {**relevance, "scope": "unknown"}
+        if decision.get("action") in {
+            "create_issue",
+            "update_existing_issue",
+            "ignore",
+        }:
+            manual_reasons.append(
+                "Claimed Flatcar scope has no validated package evidence."
+            )
+
+    affectedness = "unknown"
+    ranges = extraction.get("affected_versions") or []
+    if (
+        (extraction.get("evidence_validation") or {}).get("status") == "validated"
+        and relevance.get("scope") == "production"
+        and len(exact_matches) == 1
+        and ranges
+    ):
+        from .sbom import evaluate_simple_affected_range
+
+        if len(ranges) == 1:
+            affected = evaluate_simple_affected_range(
+                exact_matches[0].get("versionInfo"), ranges[0]
+            )
+            affectedness = affected.result
+            relevance = {
+                **relevance,
+                "affectedness_assessment": {
+                    "status": affected.result,
+                    "reason": affected.reason,
+                },
+            }
+            if affected.result == "not_affected":
+                if len(extraction.get("cves") or []) != 1:
+                    manual_reasons.append(
+                        "An advisory-wide affected range does not establish coverage of every advisory ID; per-CVE range review is required."
+                    )
+                    relevance["affectedness_assessment"]["status"] = (
+                        "needs_manual_review"
+                    )
+                scope_assessments = []
+                for scope_entry in validated_scope_entries:
+                    if scope_entry["scope"] == "production":
+                        continue
+                    scoped_comparison = evaluate_simple_affected_range(
+                        scope_entry.get("versionInfo")
+                        if scope_entry.get("discovery_only")
+                        and scope_entry.get("match_type")
+                        in {"exact_name", "exact_purl"}
+                        else None,
+                        ranges[0],
+                    )
+                    scope_assessments.append(
+                        {
+                            "scope": scope_entry["scope"],
+                            "versionInfo": scope_entry.get("versionInfo"),
+                            "status": scoped_comparison.result,
+                            "reason": scoped_comparison.reason,
+                            "snapshot_sha256": scope_entry.get("snapshot_sha256"),
+                        }
+                    )
+                    if scoped_comparison.result != "not_affected":
+                        manual_reasons.append(
+                            f"Production is outside the affected range, but {scope_entry['scope']} "
+                            f"scope is {scoped_comparison.result}; scoped review is required."
+                        )
+                relevance["affectedness_assessment"]["scope_assessments"] = (
+                    scope_assessments
+                )
+                if any(item["status"] != "not_affected" for item in scope_assessments):
+                    relevance["affectedness_assessment"]["status"] = (
+                        "needs_manual_review"
+                    )
+            if affected.result == "not_affected" and not manual_reasons:
+                return (
+                    {**relevance, "status": "not_relevant"},
+                    {
+                        "action": "ignore",
+                        "confidence": "medium",
+                        "reason": affected.reason,
+                    },
+                    [],
+                )
+            if affected.result == "ambiguous":
+                manual_reasons.append("Affected-version comparison is ambiguous.")
+        else:
+            manual_reasons.append(
+                "Multiple affected ranges have unspecified branch semantics."
+            )
+
+    if decision.get("action") in {"create_issue", "update_existing_issue"}:
+        if not exact_matches and not trusted_scopes and not issue_matches:
+            manual_reasons.append(
+                "No exact package identity or validated Flatcar scope evidence."
+            )
+        if relevance.get("scope") == "unknown" and not issue_matches:
+            manual_reasons.append("Flatcar package scope is unknown.")
+        decision = {
+            **decision,
+            "confidence": min_confidence(
+                min_confidence(
+                    decision.get("confidence"), extraction.get("confidence", "low")
+                ),
+                (extraction.get("confidence_dimensions") or {}).get(
+                    "source_extraction", "low"
+                ),
+            ),
+        }
+    relevance = {
+        **relevance,
+        "confidence_dimensions": {
+            "identity": "high"
+            if exact_matches
+            else "medium"
+            if trusted_scopes or issue_matches
+            else "low",
+            "scope": "high"
+            if trusted_scopes
+            or exact_matches
+            and relevance.get("scope") == "production"
+            else "low",
+            "source_extraction": (extraction.get("confidence_dimensions") or {}).get(
+                "source_extraction", "low"
+            ),
+            "affectedness": "high" if affectedness == "affected" else "low",
+        },
+        "open_questions": [
+            {
+                "field": "scope",
+                "question": "Where does Flatcar ship or use this exact package identity?",
+                "evidence_needed": "Validated production, SDK, sysext, build-only, or not-shipped evidence.",
+            }
+        ]
+        if relevance.get("scope") == "unknown"
+        else [],
+    }
+    if relevance["confidence_dimensions"]["affectedness"] != "high":
+        relevance["open_questions"].append(
+            {
+                "field": "affectedness",
+                "question": "Do the shipped version, OS, architecture, and enabled USE/features satisfy the advisory's affected conditions?",
+                "evidence_needed": "Source-backed affected ranges and validated Flatcar build/runtime configuration.",
+            }
+        )
     if not package_name:
         manual_reasons.append(
             "LLM extraction did not identify a package or component name."

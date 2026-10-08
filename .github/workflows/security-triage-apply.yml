@@ -27,9 +27,10 @@ permissions:
   issues: write
 
 concurrency:
-  # Scoped per review issue number so two close events (or a manual resume)
-  # for the same issue can never race; never cancel a partially-applied run.
-  group: security-triage-review-apply-${{ github.event.issue.number || github.event.inputs.issue_number }}
+  # Serialize all parts: different review issues can propose the same package.
+  # GitHub may replace an older pending run; resume it with workflow_dispatch.
+  # Never cancel an active, partially-applied run.
+  group: security-triage-review-apply-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:

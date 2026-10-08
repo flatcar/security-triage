@@ -7,10 +7,268 @@ from security_triage.issues import load_issue_fixture
 from security_triage.models import HeuristicModelClient
 from security_triage.records import Issue, SBOMPackage, SourceEntry
 from security_triage.reporting import render_discovery_markdown
+from security_triage.review import ReviewContext, build_review_batch
 from security_triage.sbom import SBOMIndex, load_sbom_fixture
 from security_triage.sources import load_source_fixture
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _cares_entry(**kwargs):
+    return SourceEntry(
+        source="gentoo",
+        source_url="https://bugs.gentoo.org/999999",
+        entry_id="999999",
+        title="c-ares: memory corruption",
+        content="Package: c-ares\nCVE: CVE-2026-99999\nCVSS: 7.5\nFixed in 1.34.6",
+        **kwargs,
+    )
+
+
+def _cares_issue(number=1970, *, package="c-ares", summary="Fixed in 1.34.6."):
+    return Issue(
+        number=number,
+        title=f"update: {package}",
+        body=(
+            f"Name: {package}\nCVEs: CVE-2026-99999\nCVSSs: 7.5\n"
+            f"Action Needed: TBD\nSummary: {summary}\n\n"
+            "refmap.gentoo: https://bugs.gentoo.org/999999"
+        ),
+        labels=["advisory", "security"],
+        html_url=f"https://github.com/flatcar/Flatcar/issues/{number}",
+    )
+
+
+def _cares_discovery(entries, issues=(), model=None):
+    return DiscoveryWorkflow(
+        model or HeuristicModelClient(),
+        SBOMIndex([SBOMPackage("c-ares", "1.34.5", "SPDXRef-cares")]),
+        list(issues),
+    ).run(entries, "2026-10-06T00:00:00Z", "2026-10-07T00:00:00Z")
+
+
+def test_discovery_cares_positive_includes_actionable_snapshot():
+    record = _cares_discovery([_cares_entry()])["records"][0]
+    assert record["decision"]["action"] == "create_issue"
+    assert record["proposed_issue"]["title"] == "update: c-ares"
+    assert record["feedback_key"].startswith("security-triage:feedback:v1:")
+    assert record["evidence_snapshot_id"]
+    assert record["next_steps"]
+    assert record["source_content"] == _cares_entry().content
+
+
+def test_discovery_passes_validated_sbom_scope_and_snapshot_to_reasoning():
+    sbom = SBOMIndex([SBOMPackage("c-ares", "1.34.5", "SPDXRef-cares")])
+    sysext = SBOMIndex([SBOMPackage("c-ares", "1.34.5", "SPDXRef-sysext-cares")])
+    scope = sysext.discovery_scope_evidence("c-ares", "sysext")
+
+    class ObservedModel(HeuristicModelClient):
+        def decide_relevance(self, bundle):
+            assert bundle["scope_evidence"] == scope
+            assert bundle["sbom_metadata"]["snapshot_sha256"]
+            return super().decide_relevance(bundle)
+
+    document = DiscoveryWorkflow(
+        ObservedModel(), sbom, [], scope_sboms=[("sysext", sysext)]
+    ).run([_cares_entry()], "", "")
+    record = document["records"][0]
+    assert record["scope_evidence"] == scope
+    assert record["flatcar_relevance"]["scope"] == "production"
+    assert record["sbom_snapshot_id"] == document["sbom_metadata"]["snapshot_sha256"]
+    assert "advisory/sysext" in record["proposed_issue"]["labels"]
+
+
+def test_discovery_production_precedence_does_not_claim_sdk_only():
+    production = SBOMIndex([SBOMPackage("c-ares", "1.34.5", "SPDXRef-cares")])
+    sdk = SBOMIndex([SBOMPackage("c-ares", "1.34.5", "SPDXRef-sdk-cares")])
+    sysext = SBOMIndex([SBOMPackage("c-ares", "1.34.5", "SPDXRef-sysext-cares")])
+    record = DiscoveryWorkflow(
+        HeuristicModelClient(),
+        production,
+        [],
+        scope_sboms=[("sdk_only", sdk), ("sysext", sysext)],
+    ).run([_cares_entry()], "", "")["records"][0]
+    assert record["flatcar_relevance"]["scope"] == "production"
+    assert "advisory/only-sdk" not in record["proposed_issue"]["labels"]
+    assert "advisory/sysext" in record["proposed_issue"]["labels"]
+
+
+def test_discovery_does_not_label_from_untrusted_extraction_scope_claims():
+    class ScopeClaimModel(HeuristicModelClient):
+        def extract_advisory(self, entry):
+            extraction = super().extract_advisory(entry)
+            extraction["scope_assessment"] = "sdk_only sysext"
+            return extraction
+
+        def decide_relevance(self, bundle):
+            return {
+                "flatcar_relevance": {"status": "relevant", "scope": "production"},
+                "decision": {"action": "create_issue", "confidence": "medium"},
+            }
+
+    record = _cares_discovery([_cares_entry()], model=ScopeClaimModel())["records"][0]
+    assert record["flatcar_relevance"]["scope"] == "production"
+    assert "advisory/only-sdk" not in record["proposed_issue"]["labels"]
+    assert "advisory/sysext" not in record["proposed_issue"]["labels"]
+
+
+def test_discovery_scope_sbom_snapshots_are_identity_scoped_and_not_production():
+    sdk = SBOMIndex(
+        [
+            SBOMPackage("c-ares", "1.34.5", "SPDXRef-sdk-cares"),
+            SBOMPackage("perl", "5.40.0", "SPDXRef-sdk-perl"),
+        ]
+    )
+    sysext = SBOMIndex([SBOMPackage("c-ares", "1.34.5", "SPDXRef-sysext-cares")])
+
+    class ScopeObserver(HeuristicModelClient):
+        def decide_relevance(self, bundle):
+            assert len(bundle["scope_evidence"]) == 2
+            assert {item["package"] for item in bundle["scope_evidence"]} == {"c-ares"}
+            assert bundle["sbom_package_matches"] == []
+            return super().decide_relevance(bundle)
+
+    record = DiscoveryWorkflow(
+        ScopeObserver(),
+        SBOMIndex([]),
+        [],
+        scope_sboms=[
+            ("sdk_only", sdk),
+            ("sysext", SBOMIndex([SBOMPackage("zfs", "2.3.0", "SPDXRef-zfs")])),
+            ("sysext", sysext),
+        ],
+    ).run([_cares_entry()], "", "")["records"][0]
+    assert record["flatcar_relevance"]["scope"] == "sdk_only"
+    assert record["sbom_package_matches"] == []
+    assert {item["scope"] for item in record["scope_evidence"]} == {
+        "sdk_only",
+        "sysext",
+    }
+    assert all(item["discovery_only"] for item in record["scope_evidence"])
+    assert {"advisory/only-sdk", "advisory/sysext"}.issubset(
+        record["proposed_issue"]["labels"]
+    )
+
+
+def test_discovery_shared_cve_never_updates_go_or_perl_instead_of_cares():
+    for package in ("go", "perl"):
+        record = _cares_discovery([_cares_entry()], [_cares_issue(package=package)])[
+            "records"
+        ][0]
+        assert record["existing_issue_matches"] == []
+        assert record["proposed_update"] is None
+        assert record["proposed_issue"]["title"] == "update: c-ares"
+
+
+def test_discovery_multiple_same_package_issues_requires_unique_target():
+    record = _cares_discovery(
+        [_cares_entry()], [_cares_issue(1970), _cares_issue(1971)]
+    )["records"][0]
+    assert record["decision"]["action"] == "needs_manual_review"
+    assert record["proposed_update"] is None
+
+
+def test_discovery_housekeeping_and_static_description_do_not_trigger_updates():
+    first = _cares_entry(
+        description="Original advisory description not repeated in the issue.",
+        metadata={"severity": "normal"},
+        new_comments=[{"count": 3, "text": "CC: another@example.org"}],
+    )
+    second = _cares_entry(
+        description=first.description,
+        metadata={"severity": "normal", "last_change_time": "later"},
+        new_comments=[{"count": 4, "text": "Thanks!"}],
+    )
+    records = _cares_discovery([first, second], [_cares_issue()])["records"]
+    for record in records:
+        assert record["decision"]["action"] == "ignore"
+        assert record["proposed_update"] is None
+        assert not record["upstream_activity"]["requires_issue_update"]
+    assert records[0]["feedback_key"] == records[1]["feedback_key"]
+
+
+def test_discovery_existing_fixed_version_in_summary_does_not_force_update():
+    record = _cares_discovery(
+        [_cares_entry()], [_cares_issue(summary="Upstream fixed in 1.34.6.")]
+    )["records"][0]
+    assert record["decision"]["action"] == "ignore"
+    assert record["upstream_activity"]["new_fixed_versions"] == []
+
+
+def test_severity_only_escalation_survives_already_tracked_and_compact_filters():
+    document = _cares_discovery(
+        [_cares_entry(metadata={"severity": "critical"})], [_cares_issue()]
+    )
+    [record] = document["records"]
+    assert record["decision"]["action"] == "update_existing_issue"
+    assert record["upstream_activity"]["requires_issue_update"]
+    assert record["upstream_activity"]["new_severity"] == "critical"
+    assert "critical" in record["proposed_update"]["comment_body"]
+    batch = build_review_batch(
+        ReviewContext(
+            advisory_repo="flatcar/Flatcar",
+            review_repo="flatcar/security-triage",
+            run_id="severity",
+            generated_at="2026-10-07T12:00:00Z",
+        ),
+        document,
+    )
+    assert len(batch.groups) == 1
+    assert not batch.omissions
+    for severity in ("normal", "unspecified", "CRITICAL"):
+        existing = _cares_issue(summary="Fixed in 1.34.6. Gentoo severity: critical.")
+        [unchanged] = _cares_discovery(
+            [_cares_entry(metadata={"severity": severity})], [existing]
+        )["records"]
+        assert unchanged["decision"]["action"] == "ignore"
+        assert not unchanged["upstream_activity"]["requires_issue_update"]
+
+
+def test_discovery_new_fixed_version_remains_actionable_with_same_cve():
+    record = _cares_discovery(
+        [_cares_entry()], [_cares_issue(summary="Previous fix was 1.34.5.")]
+    )["records"][0]
+    assert record["decision"]["action"] == "update_existing_issue"
+    assert record["upstream_activity"]["new_fixed_versions"] == ["1.34.6"]
+    assert record["proposed_update"]["issue"] == 1970
+
+
+def test_discovery_new_comments_do_not_override_intentional_ignore():
+    class IgnoreModel(HeuristicModelClient):
+        def decide_relevance(self, bundle):
+            return {
+                "flatcar_relevance": {
+                    "status": "not_relevant",
+                    "scope": "unknown",
+                    "reasons": ["Not applicable to the tracked configuration."],
+                },
+                "decision": {
+                    "action": "ignore",
+                    "confidence": "medium",
+                    "reason": "Explicit configuration exclusion.",
+                },
+            }
+
+    entry = _cares_entry(new_comments=[{"text": "Upstream clarified exploitability."}])
+    record = _cares_discovery([entry], [_cares_issue()], IgnoreModel())["records"][0]
+    assert record["decision"]["action"] == "ignore"
+    assert record["decision"]["reason"] == "Explicit configuration exclusion."
+    assert record["proposed_update"] is None
+
+
+def test_discovery_hallucinated_cve_or_fix_cannot_authorize_mutation():
+    class UnsupportedModel(HeuristicModelClient):
+        def extract_advisory(self, entry):
+            extraction = super().extract_advisory(entry)
+            extraction["cves"] = ["CVE-2026-11111"]
+            extraction["fixed_versions"] = ["99.99.99"]
+            extraction["action_needed"] = "update to >= 99.99.99"
+            return extraction
+
+    record = _cares_discovery([_cares_entry()], model=UnsupportedModel())["records"][0]
+    assert record["decision"]["action"] == "needs_manual_review"
+    assert record["proposed_issue"] is None
+    assert record["llm_extraction"]["evidence_validation"]["errors"]
 
 
 def test_append_field_values_adds_cve_that_is_not_exact_match():
@@ -41,9 +299,12 @@ def test_discovery_workflow_fixture_decisions():
         record["llm_extraction"]["package_name"]: record
         for record in document["records"]
     }
-    assert records_by_package["openssl"]["decision"]["action"] == "create_issue"
-    assert records_by_package["openssl"]["proposed_issue"]["title"] == "update: openssl"
-    assert "security" in records_by_package["openssl"]["proposed_issue"]["labels"]
+    assert records_by_package["openssl"]["decision"]["action"] == "ignore"
+    assert records_by_package["openssl"]["proposed_issue"] is None
+    assert (
+        "does not satisfy affected range"
+        in records_by_package["openssl"]["decision"]["reason"]
+    )
     assert (
         records_by_package["rust-openssl"]["decision"]["action"]
         == "update_existing_issue"
@@ -163,11 +424,12 @@ def test_discovery_updates_existing_issue_for_new_bugzilla_comment():
         == "new_bugzilla_aliases"
     )
     assert (
-        record["proposed_update"]["detected_changes"][2]["kind"] == "bugzilla_severity"
-    )
-    assert (
-        record["proposed_update"]["detected_changes"][3]["kind"]
+        record["proposed_update"]["detected_changes"][2]["kind"]
         == "new_bugzilla_comment"
+    )
+    assert not any(
+        change["kind"] == "bugzilla_severity"
+        for change in record["proposed_update"]["detected_changes"]
     )
     assert "Bugzilla comment #1" in record["proposed_update"]["comment_body"]
     markdown = render_discovery_markdown(document)
@@ -246,7 +508,7 @@ def test_discovery_existing_issue_update_preserves_cross_thread_cves_and_refs():
     assert "Proposed additive issue body update" in markdown
 
 
-def test_discovery_treats_unrelated_ambiguous_sbom_matches_as_not_shipped():
+def test_discovery_does_not_treat_unrelated_sbom_modules_as_perl_package_evidence():
     sbom = SBOMIndex(
         [
             SBOMPackage(
@@ -278,19 +540,13 @@ def test_discovery_treats_unrelated_ambiguous_sbom_matches_as_not_shipped():
     )
     record = document["records"][0]
 
-    assert {match["match_type"] for match in record["sbom_package_matches"]} == {
-        "ambiguous_substring"
-    }
+    assert record["sbom_package_matches"] == []
     assert (
-        record["flatcar_relevance"]["sbom_match_assessment"]["status"]
-        == "unrelated_matches"
+        record["flatcar_relevance"]["sbom_match_assessment"]["status"] == "no_matches"
     )
-    assert record["flatcar_relevance"]["scope"] == "not_shipped"
-    assert record["decision"]["action"] == "ignore"
-    assert "strong not-shipped evidence" in record["decision"]["reason"]
-    assert "SBOM match assessment: unrelated_matches" in render_discovery_markdown(
-        document
-    )
+    assert record["flatcar_relevance"]["scope"] == "unknown"
+    assert record["decision"]["action"] == "needs_manual_review"
+    assert record["next_steps"]
 
 
 def test_cleanup_workflow_fixture_decisions():
@@ -536,7 +792,7 @@ def test_cleanup_can_use_model_to_keep_open_for_ambiguous_package_match():
     assert record["recommended_action"] == "keep_open"
 
 
-def test_cleanup_can_use_model_to_close_for_ambiguous_package_match_with_low_confidence():
+def test_cleanup_ignores_account_group_when_matching_actual_docker_package():
     class RemediatedModel(HeuristicModelClient):
         def review_cleanup(self, evidence_bundle):
             return {
@@ -583,5 +839,5 @@ def test_cleanup_can_use_model_to_close_for_ambiguous_package_match_with_low_con
     record = document["records"][0]
 
     assert record["status"] == "remediated_in_current_production_sbom"
-    assert record["confidence"] == "low"
+    assert record["confidence"] == "high"
     assert record["recommended_action"] == "close_issue"

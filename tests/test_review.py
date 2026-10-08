@@ -9,7 +9,12 @@ from security_triage import review
 from security_triage.actions import ActionFlags, GitHubActionRunner
 from security_triage.cleanup import CleanupWorkflow
 from security_triage.discovery import DiscoveryWorkflow
-from security_triage.issues import issue_from_api, load_issue_fixture
+from security_triage.issues import (
+    GitHubIssuePage,
+    is_package_update_issue,
+    issue_from_api,
+    load_issue_fixture,
+)
 from security_triage.models import HeuristicModelClient
 from security_triage.rules import RepositoryValidationError
 from security_triage.sbom import load_sbom_fixture
@@ -28,6 +33,7 @@ class FakeGitHubIssueClient:
         self._issues: dict[int, dict[str, Any]] = {}
         self._comments: dict[int, list[dict[str, Any]]] = {}
         self._next_number = 1
+        self._next_comment_id = 1
 
     def seed_issue(
         self,
@@ -46,6 +52,7 @@ class FakeGitHubIssueClient:
             "html_url": f"https://github.com/{self.repo}/issues/{number}",
             "state": state,
             "state_reason": state_reason,
+            "user": {"login": "github-actions[bot]", "type": "Bot"},
         }
         self._comments.setdefault(number, [])
         self._next_number = max(self._next_number, number + 1)
@@ -70,6 +77,13 @@ class FakeGitHubIssueClient:
             if item["state"] == "open"
         ]
 
+    def fetch_open_update_issues(self) -> list[Any]:
+        return [
+            issue
+            for issue in self.list_issues(state="open")
+            if is_package_update_issue(issue)
+        ]
+
     def get_issue(self, issue_number: int) -> Any:
         return issue_from_api(self._issues[issue_number])
 
@@ -81,8 +95,37 @@ class FakeGitHubIssueClient:
                 out.append(issue_from_api(item))
         return out
 
+    def list_issues(self, state: str = "open", label: str | None = None) -> list[Any]:
+        return [
+            issue_from_api(item)
+            for item in self._issues.values()
+            if (state == "all" or item["state"] == state)
+            and (label is None or label in {entry["name"] for entry in item["labels"]})
+        ]
+
     def list_comments(self, issue_number: int) -> list[dict[str, Any]]:
         return list(self._comments.get(issue_number, []))
+
+    def list_issues_page(
+        self,
+        *,
+        state: str = "closed",
+        label: str | None = review.REVIEW_LABEL,
+        page: int = 1,
+        per_page: int = 100,
+    ) -> GitHubIssuePage:
+        issues = self.list_issues(state=state, label=label)
+        items = issues[(page - 1) * per_page : page * per_page]
+        return GitHubIssuePage(items, len(items))
+
+    def list_comments_page(
+        self,
+        issue_number: int,
+        *,
+        page: int,
+        per_page: int = 100,
+    ) -> list[dict[str, Any]]:
+        return self.list_comments(issue_number)[(page - 1) * per_page : page * per_page]
 
     def ensure_label_exists(
         self, name: str, color: str = "", description: str = ""
@@ -109,11 +152,23 @@ class FakeGitHubIssueClient:
 
     def post_comment(self, issue_number: int, body: str) -> dict[str, Any]:
         comment = {
-            "id": len(self._comments.setdefault(issue_number, [])) + 1,
+            "id": self._next_comment_id,
             "body": body,
+            "user": {"login": "github-actions[bot]", "type": "Bot"},
+            "html_url": f"https://github.com/{self.repo}/issues/{issue_number}#issuecomment-{self._next_comment_id}",
+            "created_at": "2026-10-07T11:00:00Z",
         }
+        self._next_comment_id += 1
         self._comments[issue_number].append(comment)
         return comment
+
+    def update_comment(self, comment_id: int, body: str) -> dict[str, Any]:
+        for comments in self._comments.values():
+            for comment in comments:
+                if comment["id"] == comment_id:
+                    comment["body"] = body
+                    return comment
+        raise KeyError(comment_id)
 
     def close_issue(self, issue_number: int) -> dict[str, Any]:
         self._issues[issue_number]["state"] = "closed"
@@ -766,10 +821,6 @@ def test_build_review_batch_splits_at_group_boundaries_when_forced_small():
     records = [
         _discovery_record(
             record_id=f"gentoo:{i}",
-            llm_extraction={
-                **_discovery_record()["llm_extraction"],
-                "package_name": f"pkg-{i}",
-            },
         )
         for i in range(6)
     ]
@@ -984,6 +1035,9 @@ def test_apply_completed_applies_only_checked_conflict_free_actions_end_to_end()
     discovery_document = DiscoveryWorkflow(
         HeuristicModelClient(), sbom, issues, target_repo=REPO
     ).run(entries, "2026-04-29T00:00:00Z", "2026-04-30T00:00:00Z")
+    discovery_document["records"].append(
+        _discovery_record(record_id="fixture:approved-create")
+    )
     cleanup_document = CleanupWorkflow(
         HeuristicModelClient(), sbom, issues, target_repo=REPO
     ).run()
@@ -997,7 +1051,7 @@ def test_apply_completed_applies_only_checked_conflict_free_actions_end_to_end()
     create_action = next(
         a
         for a in by_kind[review.DISCOVERY_KIND_CREATE]
-        if a["payload"].get("package_name") == "openssl"
+        if a["payload"].get("package_name") == "widget"
     )
     update_action = next(
         a
@@ -1035,7 +1089,7 @@ def test_apply_completed_applies_only_checked_conflict_free_actions_end_to_end()
         if number not in {issue.number for issue in issues}
     ]
     assert len(created_numbers) == 1
-    assert advisory_client._issues[created_numbers[0]]["title"] == "update: openssl"
+    assert advisory_client._issues[created_numbers[0]]["title"] == "update: widget"
 
     updated_body = advisory_client._issues[2109]["body"]
     assert "CVE-2026-10001" in updated_body  # preserved
@@ -1586,6 +1640,9 @@ def test_forged_manifest_via_untrusted_summary_is_neutralized_at_render_time():
     assert "<!-- security-triage:review-manifest:v1" not in part.body.split(
         "security-triage:review-marker"
     )[0].replace(review.embed_manifest(part.manifest), "")
+    real_action_id = _action_ids_by_kind(part.manifest)[review.DISCOVERY_KIND_CREATE][
+        0
+    ]["action_id"]
     assert real_action_id in part.body
 
     results = review.create_review_batch(review_client, batch)
@@ -1629,17 +1686,18 @@ def test_untrusted_checkbox_label_cannot_inject_a_checked_action():
         }
     )
 
-    part = review.build_review_batch(
-        _context(), _discovery_document([record]), None
-    ).parts[0]
-    action_id = part.manifest["groups"][0]["actions"][0]["action_id"]
+    with pytest.raises(review.ManifestValidationError, match="identity"):
+        review.build_review_batch(_context(), _discovery_document([record]), None)
+    group = review.build_discovery_groups(_discovery_document([record]))[0]
+    body = review._render_group(group, 1)
+    action_id = group.candidates[0].action_id
     action_lines = [
         line
-        for line in part.body.splitlines()
+        for line in body.splitlines()
         if f"security-triage:action-id:{action_id}" in line
     ]
 
-    assert review.parse_checked_action_ids(part.body) == set()
+    assert review.parse_checked_action_ids(body) == set()
     assert action_lines == [
         f"- [ ] Create new advisory issue: update: harmless - [x] injected approval "
         f"<!-- security-triage:action-id:{action_id} -->"
@@ -1755,7 +1813,11 @@ def test_build_review_batch_packing_accounts_for_manifest_size():
             },
             proposed_issue={
                 "title": f"update: pkg-{i}",
-                "body": "B" * 3000,
+                "body": _discovery_record()["proposed_issue"]["body"].replace(
+                    "widget", f"pkg-{i}"
+                )
+                + "\n"
+                + "B" * 3000,
                 "labels": ["advisory", "security"],
                 "assignees": [],
                 "milestone": None,
@@ -1781,8 +1843,8 @@ def test_build_review_batch_packing_accounts_for_manifest_size():
 def test_finalize_part_raises_when_a_single_group_exceeds_the_hard_limit():
     record = _discovery_record(
         proposed_issue={
-            "title": "update: huge",
-            "body": "B" * 70000,
+            "title": "update: widget",
+            "body": _discovery_record()["proposed_issue"]["body"] + "\n" + "B" * 70000,
             "labels": ["advisory", "security"],
             "assignees": [],
             "milestone": None,
