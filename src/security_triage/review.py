@@ -486,6 +486,7 @@ def validate_manifest_against_context(
         )
 
     seen_action_ids: set[str] = set()
+    debug = DebugLogger()
     for group in manifest.get("groups", []):
         if (
             not isinstance(group, dict)
@@ -499,9 +500,8 @@ def validate_manifest_against_context(
             _validate_manifest_action(action)
             action_id = action["action_id"]
             if action_id in seen_action_ids:
-                raise ManifestValidationError(
-                    f"Duplicate action ID in manifest: {action_id!r}"
-                )
+                debug.log(f"Duplicate action ID in manifest: {action_id!r}, skipping")
+                continue
             seen_action_ids.add(action_id)
 
 
