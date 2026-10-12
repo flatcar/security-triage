@@ -3,7 +3,7 @@
 This repository contains a Flatcar-specific advisory assistant for two workflows:
 
 - new vulnerability discovery from upstream security sources
-- cleanup recommendations for open Flatcar advisory issues using the current Stable production SBOM
+- cleanup recommendations for open Flatcar advisory issues using the current Alpha production SBOM
 
 It is intentionally conservative. The default mode is read-only, produces machine-readable JSON/YAML, and sends uncertain cases to `needs_manual_review`.
 
@@ -206,6 +206,34 @@ uv run security-triage cleanup \
   --debug-log reports/cleanup-debug.jsonl
 ```
 
+Discovery defaults to the **main nightly production-image SBOM**, not the latest
+Alpha release. It resolves `FLATCAR_VERSION` once from the
+[main scripts manifest](https://raw.githubusercontent.com/flatcar/scripts/main/sdk_container/.repo/manifests/version.txt),
+then fetches the pinned artifact at
+`https://bincache.flatcar-linux.net/images/amd64/{FLATCAR_VERSION}/flatcar_production_image_sbom.json`
+(retaining the `+` in the nightly version). JSON reports, Markdown reports and
+model evidence identify the selected source, version, manifest and exact SBOM URL.
+Each human-gated review group also displays its record's source and pinned
+nightly version/URL, explicitly distinguishing unreleased candidates from Alpha.
+
+The manifest may advance **before the image build finishes**: this is the latest
+main candidate, not a latest-successful-CI pointer. Missing, unavailable, malformed
+or empty nightly inventory fails the run; there is **no silent Alpha fallback**.
+SBOM availability alone does not prove that all CI passed or that a fix was released.
+Use `discovery --sbom-source alpha` explicitly to compare against current Alpha.
+`--sbom-fixture` takes precedence over either source and remains offline, with
+local fixture provenance. Cleanup always uses current Alpha and has no source option.
+
+Model-backed discovery compares the selected inventory with source-grounded
+affected/fixed requirements from advisory descriptions, metadata and comments.
+It may ignore a proposal when all CVEs are fixed or not affected in the relevant
+Flatcar scope, including USE-flag exclusions. Numeric version ordering alone is
+insufficient: a fix on one release series need not cover another series.
+Uncertain package identity, ranges, coverage or scope require manual review.
+Nightly evidence does not establish released remediation, and existing issues
+still receive guarded additive upstream updates. The local heuristic fallback
+retains its existing package/scope behavior; it does not evaluate version ranges.
+
 Discovery defaults to a seven-day processing window. Live sources are source-specific where structure is available:
 
 - Gentoo uses Bugzilla REST bugs plus comments.
@@ -310,6 +338,7 @@ Discovery JSON root fields include:
 - `processing_window`
 - `sources`
 - `model`
+- `sbom_metadata` (SPDX metadata and selected-source `provenance`)
 - `records`
 - `errors`
 

@@ -50,7 +50,11 @@ from .rules import (
     validate_discovery_document,
     validate_repo_name,
 )
-from .sbom import fetch_flatcar_production_sbom, load_sbom_fixture
+from .sbom import (
+    fetch_flatcar_discovery_sbom,
+    fetch_flatcar_production_sbom,
+    load_sbom_fixture,
+)
 from .sources import fetch_live_sources, load_source_fixture
 from .time_utils import default_processing_window, iso_now
 
@@ -102,7 +106,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--issues-fixture", help="JSON/YAML fixture containing GitHub issues"
     )
     discovery.add_argument(
-        "--sbom-fixture", help="SPDX JSON fixture for the Stable production SBOM"
+        "--sbom-fixture", help="Local SPDX JSON fixture; overrides --sbom-source"
+    )
+    discovery.add_argument(
+        "--sbom-source",
+        choices=("nightly", "alpha"),
+        default="nightly",
+        help="Discovery inventory: main nightly candidate (default) or current Alpha",
     )
     discovery.add_argument(
         "--window-start", help="Processing window start ISO timestamp"
@@ -371,8 +381,14 @@ def run_discovery_command(args: argparse.Namespace) -> int:
         progress.info(f"Loading SBOM fixture: {args.sbom_fixture}")
         sbom_index = load_sbom_fixture(args.sbom_fixture)
     else:
-        progress.info("Fetching current Flatcar production SBOM")
-        sbom_index = fetch_flatcar_production_sbom()
+        progress.info(f"Fetching Flatcar discovery SBOM: {args.sbom_source}")
+        sbom_index = fetch_flatcar_discovery_sbom(args.sbom_source)
+    provenance = sbom_index.metadata.get("provenance", {})
+    progress.info(
+        f"Discovery SBOM source: {provenance.get('source', 'unknown')} "
+        f"{provenance.get('version', '')} "
+        f"({provenance.get('sbom_url') or provenance.get('fixture_path') or 'unknown location'})"
+    )
     progress.info(f"Loaded SBOM with {len(sbom_index.packages)} package(s)")
     if args.source_fixture:
         fixture_start = window_start if args.window_start else None
