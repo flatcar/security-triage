@@ -486,6 +486,7 @@ def validate_manifest_against_context(
         )
 
     seen_action_ids: set[str] = set()
+    debug = DebugLogger()
     for group in manifest.get("groups", []):
         if (
             not isinstance(group, dict)
@@ -499,9 +500,8 @@ def validate_manifest_against_context(
             _validate_manifest_action(action)
             action_id = action["action_id"]
             if action_id in seen_action_ids:
-                raise ManifestValidationError(
-                    f"Duplicate action ID in manifest: {action_id!r}"
-                )
+                debug.log(f"Duplicate action ID in manifest: {action_id!r}, skipping")
+                continue
             seen_action_ids.add(action_id)
 
 
@@ -1619,6 +1619,7 @@ def build_review_batch(
     context: ReviewContext,
     discovery_document: dict[str, Any] | None = None,
     cleanup_document: dict[str, Any] | None = None,
+    progress_logger: ProgressLogger | None = None,
 ) -> ReviewBatch:
     """Build a complete, self-contained review batch without any GitHub calls.
 
@@ -1626,10 +1627,26 @@ def build_review_batch(
     dry-run) commands so both produce byte-identical part titles/bodies for
     the same inputs.
     """
+    progress = progress_logger or NullProgressLogger()
     all_groups = [
         *build_discovery_groups(discovery_document),
         *build_cleanup_groups(cleanup_document),
     ]
+    seen_action_ids: set[str] = set()
+    unique_groups: list[DecisionGroup] = []
+    for group in all_groups:
+        action_ids = [candidate.action_id for candidate in group.candidates]
+        if len(action_ids) != len(set(action_ids)) or any(
+            action_id in seen_action_ids for action_id in action_ids
+        ):
+            progress.info(
+                f"Duplicate action ID in review batch; skipping group {group.group_id!r}"
+            )
+            continue
+        seen_action_ids.update(action_ids)
+        unique_groups.append(group)
+    all_groups = unique_groups
+
     rendered_groups: list[tuple[DecisionGroup, str, int]] = []
     for index, group in enumerate(all_groups):
         text = _render_group(group, index + 1)
@@ -1751,9 +1768,12 @@ def render_dry_run(
     output_dir: str | Path,
     discovery_document: dict[str, Any] | None = None,
     cleanup_document: dict[str, Any] | None = None,
+    progress_logger: ProgressLogger | None = None,
 ) -> tuple[ReviewBatch, list[Path]]:
     """Build a review batch and write it to local Markdown files (no GitHub calls)."""
-    batch = build_review_batch(context, discovery_document, cleanup_document)
+    batch = build_review_batch(
+        context, discovery_document, cleanup_document, progress_logger
+    )
     paths = write_dry_run_batch(batch, output_dir, context.review_repo)
     return batch, paths
 
