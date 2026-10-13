@@ -1584,6 +1584,7 @@ def build_review_batch(
     context: ReviewContext,
     discovery_document: dict[str, Any] | None = None,
     cleanup_document: dict[str, Any] | None = None,
+    progress_logger: ProgressLogger | None = None,
 ) -> ReviewBatch:
     """Build a complete, self-contained review batch without any GitHub calls.
 
@@ -1591,6 +1592,7 @@ def build_review_batch(
     dry-run) commands so both produce byte-identical part titles/bodies for
     the same inputs.
     """
+    progress = progress_logger or NullProgressLogger()
     all_groups = [
         *build_discovery_groups(discovery_document),
         *build_cleanup_groups(cleanup_document),
@@ -1602,7 +1604,7 @@ def build_review_batch(
         if len(action_ids) != len(set(action_ids)) or any(
             action_id in seen_action_ids for action_id in action_ids
         ):
-            DebugLogger().log(
+            progress.info(
                 f"Duplicate action ID in review batch; skipping group {group.group_id!r}"
             )
             continue
@@ -1731,9 +1733,12 @@ def render_dry_run(
     output_dir: str | Path,
     discovery_document: dict[str, Any] | None = None,
     cleanup_document: dict[str, Any] | None = None,
+    progress_logger: ProgressLogger | None = None,
 ) -> tuple[ReviewBatch, list[Path]]:
     """Build a review batch and write it to local Markdown files (no GitHub calls)."""
-    batch = build_review_batch(context, discovery_document, cleanup_document)
+    batch = build_review_batch(
+        context, discovery_document, cleanup_document, progress_logger
+    )
     paths = write_dry_run_batch(batch, output_dir, context.review_repo)
     return batch, paths
 

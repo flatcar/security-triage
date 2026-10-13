@@ -480,7 +480,9 @@ def run_review_create_command(args: argparse.Namespace) -> int:
         args.cleanup_json, validate_cleanup_document
     )
     context = _build_review_context(args, advisory_repo, review_repo)
-    batch = build_review_batch(context, discovery_document, cleanup_document)
+    batch = build_review_batch(
+        context, discovery_document, cleanup_document, progress_logger=progress
+    )
 
     if not batch.groups:
         progress.info(
@@ -552,7 +554,11 @@ def run_review_render_command(args: argparse.Namespace) -> int:
     )
     context = _build_review_context(args, advisory_repo, review_repo)
     batch, paths = render_dry_run(
-        context, args.output_dir, discovery_document, cleanup_document
+        context,
+        args.output_dir,
+        discovery_document,
+        cleanup_document,
+        progress_logger=progress,
     )
     progress.info(
         f"Rendered {len(batch.parts)} review part(s) covering "

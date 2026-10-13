@@ -759,7 +759,9 @@ def test_build_review_batch_covers_fixture_backed_discovery_and_cleanup():
     assert batch.parts[0].manifest["review_repo"] == REPO
 
 
-def test_build_review_batch_skips_groups_with_duplicate_action_ids():
+def test_build_review_batch_skips_duplicate_action_ids_and_logs_omission(
+    tmp_path, capsys
+):
     duplicate_record_id = "gentoo:duplicate"
     records = [
         _discovery_record(record_id=duplicate_record_id),
@@ -772,8 +774,15 @@ def test_build_review_batch_skips_groups_with_duplicate_action_ids():
         ),
     ]
 
-    batch = review.build_review_batch(_context(), _discovery_document(records), None)
+    batch, _ = review.render_dry_run(
+        _context(),
+        tmp_path,
+        _discovery_document(records),
+        None,
+        progress_logger=review.ProgressLogger(),
+    )
 
+    assert "Duplicate action ID in review batch; skipping group" in capsys.readouterr().err
     assert len(batch.groups) == 1
     manifest_groups = batch.parts[0].manifest["groups"]
     assert len(manifest_groups) == 1
