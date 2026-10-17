@@ -219,7 +219,11 @@ def test_cli_cleanup_writes_parameterized_target_repo_and_query(tmp_path):
     assert "flatcar/Flatcar" not in document["issue_query"]
 
 
-def test_review_render_and_create_and_apply_are_registered_subcommands():
+def test_review_plan_render_and_create_and_apply_are_registered_subcommands():
+    args = build_parser().parse_args(
+        ["review", "plan", "--advisory-repo", "a/b", "--review-repo", "a/b"]
+    )
+    assert args.review_command == "plan"
     args = build_parser().parse_args(
         ["review", "render", "--advisory-repo", "a/b", "--review-repo", "a/b"]
     )
@@ -242,6 +246,65 @@ def test_review_render_and_create_and_apply_are_registered_subcommands():
     )
     assert args.review_command == "apply"
     assert args.issue_number == 5
+
+
+def test_review_plan_requires_explicit_repos_with_no_flatcar_flatcar_default(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("SECURITY_TRIAGE_ADVISORY_REPO", raising=False)
+    monkeypatch.delenv("SECURITY_TRIAGE_REVIEW_REPO", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    result = main(["review", "plan"])
+
+    assert result == 1
+
+
+def test_cli_review_plan_prints_human_gated_workflow(capsys):
+    result = main(
+        [
+            "review",
+            "plan",
+            "--advisory-repo",
+            "flatcar/security-triage",
+            "--review-repo",
+            "flatcar/security-triage",
+        ]
+    )
+
+    assert result == 0
+    captured = capsys.readouterr()
+    assert "# Flatcar Security Triage Review Plan" in captured.out
+    assert "Advisory repo: `flatcar/security-triage`" in captured.out
+    assert "security-triage review render" in captured.out
+    assert "security-triage review apply" in captured.out
+    assert (
+        "mutates GitHub only after a completed review issue is closed" in captured.out
+    )
+    assert captured.err == ""
+
+
+def test_cli_review_plan_can_write_markdown_file(tmp_path, capsys):
+    output = tmp_path / "review-plan.md"
+
+    result = main(
+        [
+            "review",
+            "plan",
+            "--advisory-repo",
+            "flatcar/security-triage",
+            "--review-repo",
+            "flatcar/security-triage",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert result == 0
+    assert output.read_text(encoding="utf-8").startswith(
+        "# Flatcar Security Triage Review Plan"
+    )
+    assert capsys.readouterr().out == f"wrote {output}\n"
 
 
 def test_review_render_requires_explicit_repos_with_no_flatcar_flatcar_default(
