@@ -782,7 +782,9 @@ def test_build_review_batch_skips_duplicate_action_ids_and_logs_omission(
         progress_logger=review.ProgressLogger(),
     )
 
-    assert "Duplicate action ID in review batch; skipping group" in capsys.readouterr().err
+    assert (
+        "Duplicate action ID in review batch; skipping group" in capsys.readouterr().err
+    )
     assert len(batch.groups) == 1
     manifest_groups = batch.parts[0].manifest["groups"]
     assert len(manifest_groups) == 1
