@@ -20,16 +20,40 @@ Do not build a generic CVE scanner. Build a Flatcar security-tracking assistant.
 The active Python package is `security_triage` under `src/security_triage/`.
 The CLI entry point is `security-triage = security_triage.cli:main`.
 
-Use these local commands unless a task requires something else:
+Use these local commands from the repository root unless a task requires something else (`dev` is a dependency group, not an extra):
 
 ```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev,yaml]'
-.venv/bin/python -m pytest
-.venv/bin/security-triage --version
+uv sync --group dev --extra yaml
+uv run pytest
+uv run security-triage --version
 ```
 
 The repository/project migration target is `flatcar/security-triage`, but the advisory issue target remains `flatcar/Flatcar`. `discovery`/`cleanup` accept `--advisory-repo` (env `SECURITY_TRIAGE_ADVISORY_REPO`) and default to `flatcar/Flatcar` for backward compatibility; the `review` commands below require an explicit `--advisory-repo`/`--review-repo` (or their environment variables) with no implicit default.
+
+---
+
+## Code Style and Required Formatting Checks
+
+Ruff is the source of truth for Python formatting and linting. Follow `pyproject.toml` and the checks in `.github/workflows/lint.yml`; do not approximate formatting with AI or visual inspection.
+
+- Use the repository's development dependencies and locked Ruff version rather than an arbitrary global formatter.
+- The configured style targets Python 3.12, an 88-character line length, double quotes, and space indentation (Ruff's default is four spaces).
+- Let `ruff format` handle line wrapping, parentheses, trailing commas, and whitespace, including in tests. [PR #521](https://github.com/flatcar/security-triage/pull/521) fixed a long `assert` by wrapping its expression in parentheses across multiple lines.
+- `E501` is intentionally ignored by the linter, but formatter checks still enforce Ruff's wrapping decisions. Do not manually split strings the formatter leaves long or disable checks to avoid formatting failures.
+- Lint rules include `E`, `W`, `F`, `I`, `B`, `C4`, and `UP`, covering pycodestyle, Pyflakes, import sorting, bugbear, comprehensions, and Python upgrades.
+
+**Always run tool-based formatting verification after the final edit and before finishing work**, including small or test-only changes. Passing tests, passing `ruff check`, and AI/code review are not substitutes for running `ruff format --check`: PR #521's preceding CI run passed lint but failed formatting.
+
+From the repository root, run:
+
+```bash
+uv run ruff check --no-fix src/ tests/
+uv run ruff format --check src/ tests/
+```
+
+`--no-fix` makes lint verification read-only despite the configured `fix = true`. `make format-check` runs the same formatting check. If formatting fails on files you changed, format those files with `uv run ruff format <changed-python-files>` (or `make format` for the full `src/` and `tests/` trees), inspect the diff, and rerun both checks after any fixes. Keep unrelated changes out of the patch and do not weaken the configuration to make checks pass.
+
+Report the actual commands and results in the final response. If tools cannot run or an unrelated baseline failure remains, state that explicitly; never claim formatting passed without successful tool output.
 
 ---
 
