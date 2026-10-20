@@ -56,6 +56,105 @@ One question for maintainers is whether this type of invalidation is already det
 
 ## Proposed Pipeline Model
 
+### Architecture and Data Flow
+
+> **Proposed architecture, not implemented.** Cylinders are durable stores,
+> rectangles are processes, and the diamond is the human approval gate.
+> Buckets below are logical storage areas: they could start as files and
+> workflow artifacts, without provisioning an object-storage service.
+
+[Open the rendered architecture graphic](pipeline-architecture.svg).
+
+```mermaid
+flowchart TB
+    classDef source fill:#dbeafe,stroke:#2563eb,color:#000
+    classDef process fill:#dcfce7,stroke:#15803d,color:#000
+    classDef store fill:#fef3c7,stroke:#a16207,color:#000
+    classDef model fill:#ede9fe,stroke:#7c3aed,color:#000
+    classDef gate fill:#fee2e2,stroke:#b91c1c,color:#000
+
+    subgraph extract["1. Extract: preserve the evidence"]
+        upstream[/"Advisory sources<br/>Gentoo, OSV, Go, RustSec,<br/>Bugzilla, oss-security"/]:::source
+        flatcar[/"Flatcar release sources<br/>SBOMs, release metadata,<br/>resolved build configuration"/]:::source
+        collect["Source adapters<br/>Fetch changed records;<br/>retain source IDs and timestamps"]:::process
+        raw[("Raw evidence bucket<br/>Original responses + fetch metadata<br/>Immutable snapshots by source / run")]:::store
+        upstream --> collect
+        flatcar --> collect
+        collect --> raw
+    end
+
+    subgraph transform["2. Transform: make comparable records"]
+        normalize["Parse and validate<br/>Normalize CVE aliases, package IDs,<br/>version ranges and release facts"]:::process
+        normalized[("Normalized data bucket<br/>advisories.ndjson + release facts<br/>References back to raw evidence")]:::store
+        match["Deterministic matcher<br/>Join advisory ranges to release packages;<br/>check scope and previous decision premises"]:::process
+        findings[("Findings bucket<br/>CVE x package x release<br/>Evidence + under_investigation status")]:::store
+        raw --> normalize --> normalized --> match --> findings
+    end
+
+    subgraph triage["3. Triage: propose, then approve"]
+        llm["LLM proposal worker<br/>One finding + relevant advisory,<br/>package/build facts + prior decision"]:::model
+        proposals[("Proposal bucket<br/>Suggested status + justification<br/>Evidence refs + prompt/model version")]:::store
+        review["GitHub review interface<br/>Show finding, evidence and proposal;<br/>maintainer approves or overrides"]:::process
+        approve{"Explicit maintainer approval<br/>and valid structured decision?"}:::gate
+        decisions[("Reviewed decision store<br/>Status, rationale, reviewer,<br/>scope and testable premises")]:::store
+        findings --> llm --> proposals --> review --> approve
+        approve -->|"yes: persist reviewed result"| decisions
+        approve -->|"no: remain pending"| review
+    end
+
+    subgraph publish["4. Load and report: revalidate before publishing"]
+        validate["Revalidate and generate VEX<br/>Check decision premises against current facts;<br/>unknown or changed = under_investigation"]:::process
+        outputs[("Published output bucket<br/>Per-release VEX + reports<br/>Input snapshot and decision references")]:::store
+        findings --> validate
+        decisions --> validate
+        normalized -->|"current release / advisory facts"| validate
+        validate --> outputs
+    end
+
+    decisions -.->|"prior decision and premises"| match
+    decisions -.->|"relevant prior decision"| llm
+    validate -.->|"changed or unverifiable: re-queue finding"| findings
+```
+
+**How to read the flow:**
+
+1. **Extract saves evidence, not conclusions.** Each adapter records the original
+   response, source URL, retrieval time and content hash. A failed source is
+   reported explicitly, not treated as having no vulnerabilities. Transformation
+   can be replayed from these snapshots without another upstream fetch.
+2. **Transform creates the unit of work.** Parsers produce a common advisory
+   schema and release/package facts. The matcher joins them into one finding per
+   CVE, package and release. It retains the matching range and evidence references;
+   a version match alone does not establish exploitability. Kernel CVEs remain in
+   the regular kernel-update flow, outside normal advisory triage.
+3. **The model receives one evidence bundle, not the whole bucket.** A worker
+   selects one finding, its advisory text, matching SBOM entries, relevant build
+   facts and any applicable previous decision. A fixed system prompt treats source
+   text as untrusted data. The response is schema-validated proposal JSON, never an
+   authoritative decision. Missing build facts stay unknown.
+4. **Human approval crosses the decision boundary.** The review interface shows
+   the proposal and supporting evidence. Only an explicitly approved, validated
+   result enters the reviewed decision store. The exact UI interaction remains
+   open; this diagram does not change the existing human-gated apply mechanism.
+   Normal package advisory issues still follow the existing additive-update and
+   duplicate-prevention rules, rather than automatically creating one per CVE.
+5. **Publication checks the premises again.** VEX generation reads findings,
+   reviewed decisions and current release facts. A changed USE flag, advisory or
+   package state can invalidate a decision. Unverifiable decisions produce
+   `under_investigation` and return to review, without deleting decision history.
+
+### Decision Log
+
+The following are design recommendations for this diagram, pending maintainer
+review, not claims about the current implementation:
+
+| Design choice | Reason |
+|---|---|
+| Separate raw evidence, normalized records, findings and proposals | Replay parsing or model steps without losing the original evidence or confusing proposals with reviewed results. |
+| Keep reviewed decisions authoritative outside GitHub issue prose | Make release-scoped decisions and their premises reliably consumable by VEX generation. |
+| Start with logical stores and scheduled jobs | No queue service, cloud bucket or new database is required until volume and retention needs justify one. |
+| Carry input hashes, schema versions and stable finding IDs between stages | Support traceability and idempotent reruns; advance source checkpoints only after successful persistence. |
+
 The pipeline could be organized into four broad stages:
 
 ### Extract
