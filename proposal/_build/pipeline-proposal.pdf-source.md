@@ -31,7 +31,7 @@ I need answers to five questions. The suggested defaults are mine.
 
 ## Problem
 
-Very few people work on Flatcar security, so everything that can sensibly be automated should be: finding CVEs, matching them to packages, proposing triage, generating VEX. Humans stay where judgment is needed. The output matters as much as the automation: published VEX files and release notes let users and outside security teams see which CVEs affect a release and why, without asking us.
+To streamline security responses in the age of AI augmented security research, everything that can sensibly be automated should be: finding CVEs, matching them to packages, proposing triage, generating VEX. Humans stay where judgment is needed. The output matters as much as the automation: published VEX files and release notes let users and outside security teams see which CVEs affect a release and why, without asking us.
 
 A package may contain vulnerable code upstream while Flatcar builds it without that code, or does not ship it at all. Those findings still need an answer in VEX, and the useful part is the reason, not just the verdict.
 
