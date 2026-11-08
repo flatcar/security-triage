@@ -14,9 +14,11 @@ generation) and `security-triage` (LLM-assisted, human-gated review) into one
 traceable flow. Nothing existing is replaced; kernel CVEs, desktop packages
 and the manual advisory issue style stay as they are.
 
-The goal is less churn for maintainers, and the automation will be evaluated
-on that. Maintainers get summarised information to make an informed decision
-instead of collecting it by hand.
+The guiding goal is to reduce churn for maintainers by compiling the
+information needed for an educated decision, instead of having them collect it
+by hand. The automation will be evaluated on that. Every implementation choice
+below should follow this guideline, so the proposal can be judged on the goal
+without settling the implementation details first.
 
 Three rules hold it together. The LLM only proposes; a maintainer approves
 every decision, even if that is one click approving a batch. Every decision
@@ -31,7 +33,7 @@ I need answers to five questions. The suggested defaults are mine.
 | 1 | Where do triage decisions live today, and may a file in git become the source of truth? | Today they are implicit in a tracking issue's state: labels, comments, open or closed. Proposed: `decisions.ndjson` in git; GitHub issues stay the review UI |
 | 2 | Is the resolved build configuration (USE flags) available per release in machine-readable form? | Not in the SBOM, which is self-contained: libraries pulled in by USE flags are listed, the flags are not. The SLSA provenance shipped in the image is a candidate source; it may need extending and is not published separately yet. Open for now |
 | 3 | Are existing `not_affected` decisions rechecked against new releases, or kept as permanent suppressions? | Issues closed as "not affected" stay closed, so decisions must be stored and rechecked. Later idea: a monthly diff of USE flags re-triages packages with `not_affected` CVEs |
-| 4 | One review issue per CVE, per finding, or grouped? | Grouped per (upcoming or published) release and affected package, as issues are today. Decisions are stored separately from the review issue |
+| 4 | One review issue per CVE, per finding, or grouped? | Grouped per (upcoming or published) release and affected package, as issues are today. Decisions are stored separately from the review issue. How a batch is laid out follows the churn-reduction goal |
 | 5 | May published VEX files be corrected retroactively? | Yes, it is the only way to announce new vulnerabilities in published releases. Later stage, likely a backfilling job |
 
 
@@ -233,7 +235,9 @@ reads them directly. Today a review's replayable state is a manifest embedded
 in the review issue; that stays as the record of one batch, and the decision
 file becomes the record across batches. The catch is that `review apply` would
 need to write to git, for example by opening a pull request, and its workflow
-only holds `issues: write` today.
+only holds `issues: write` today. Since closed "not affected" issues stay
+closed, the VEX tooling needs its own storage back-end for decisions anyway;
+that storage should be designed for the whole system rather than separately.
 
 One issue per CVE does not fit, since a CVE can touch several packages and
 releases. Review issues are grouped per release and affected package, which
