@@ -1,24 +1,42 @@
 # Proposal (v1): ETL-Based Security Pipeline with LLM-Assisted CVE Triage
 
-> **Status: v1, work in progress, not implemented.** A discussion document, not a finalized design. This is the first version of the proposal, written up after the first maintainer review; expect it to change as the open questions are resolved and the tools get built. Feedback is welcome.
+> **Status: v1, work in progress, not implemented.** A discussion document,
+> not a finalized design. This is the first version of the proposal, written
+> up after the first maintainer review; expect it to change as the open
+> questions are resolved and the tools get built. Feedback is welcome.
 
 ## TL;DR
 
-Scanners report CVEs against packages that are often not exploitable in a Flatcar image, for example because a USE flag disables the vulnerable code. This proposal joins `vex-automation` (deterministic matching and OpenVEX generation) and `security-triage` (LLM-assisted, human-gated review) into one traceable flow. Nothing existing is replaced; kernel CVEs, desktop packages and the manual advisory issue style stay as they are.
+Scanners report CVEs against packages that are often not exploitable in a
+Flatcar image, for example because a USE flag disables the vulnerable code.
+This proposal joins `vex-automation` (deterministic matching and OpenVEX
+generation) and `security-triage` (LLM-assisted, human-gated review) into one
+traceable flow. Nothing existing is replaced; kernel CVEs, desktop packages
+and the manual advisory issue style stay as they are.
 
-Three rules hold it together. The LLM only proposes; a maintainer approves every decision. Every decision records the conditions it relies on (package version, USE flags, package presence). If those can no longer be verified, VEX says `under_investigation`, never a stale `not_affected`.
+The goal is less churn for maintainers, and the automation will be evaluated
+on that. Maintainers get summarised information to make an informed decision
+instead of collecting it by hand.
+
+Three rules hold it together. The LLM only proposes; a maintainer approves
+every decision, even if that is one click approving a batch. Every decision
+records the conditions it relies on (package version, USE flags, package
+presence). If those can no longer be verified, VEX says `under_investigation`,
+never a stale `not_affected`.
 
 I need answers to five questions. The suggested defaults are mine.
 
 | # | Question | Suggested default |
 |--|------------------------------|--------------------|
-| 1 | Where do triage decisions live today, and may a file in git become the source of truth? | `decisions.ndjson` in git; GitHub issues stay the review UI |
-| 2 | Is the resolved build configuration (USE flags) available per release in machine-readable form? | Unknown. As far as the docs show, the SBOM lists name, version and purl, not USE flags |
-| 3 | Are existing `not_affected` decisions rechecked against new releases, or kept as permanent suppressions? | Probably no stored decisions exist ([`current-state.md`](https://github.com/flatcar/vex-automation/blob/main/docs/current-state.md)); please confirm |
-| 4 | One review issue per CVE, per finding, or grouped? | Grouped issues, one canonical record per CVE |
-| 5 | May published VEX files be corrected retroactively? | Open, see [Relationship to existing work](#relationship-to-existing-work) |
+| 1 | Where do triage decisions live today, and may a file in git become the source of truth? | Today they are implicit in a tracking issue's state: labels, comments, open or closed. Proposed: `decisions.ndjson` in git; GitHub issues stay the review UI |
+| 2 | Is the resolved build configuration (USE flags) available per release in machine-readable form? | Not in the SBOM, which is self-contained: libraries pulled in by USE flags are listed, the flags are not. The SLSA provenance shipped in the image is a candidate source; it may need extending and is not published separately yet. Open for now |
+| 3 | Are existing `not_affected` decisions rechecked against new releases, or kept as permanent suppressions? | Issues closed as "not affected" stay closed, so decisions must be stored and rechecked. Later idea: a monthly diff of USE flags re-triages packages with `not_affected` CVEs |
+| 4 | One review issue per CVE, per finding, or grouped? | Grouped per (upcoming or published) release and affected package, as issues are today. Decisions are stored separately from the review issue |
+| 5 | May published VEX files be corrected retroactively? | Yes, it is the only way to announce new vulnerabilities in published releases. Later stage, likely a backfilling job |
+
 
 ## Action items from the first maintainer review
+
 
 | Item | What to do |
 |------|------------|
@@ -29,15 +47,46 @@ I need answers to five questions. The suggested defaults are mine.
 
 ## Problem
 
-Very few people work on Flatcar security, so everything that can sensibly be automated should be: finding CVEs, matching them to packages, proposing triage, generating VEX. Humans stay where judgment is needed. The output matters as much as the automation: published VEX files and release notes let users and outside security teams see which CVEs affect a release and why, without asking us.
+To streamline security responses in the age of AI augmented security research,
+everything that can sensibly be automated should be: finding CVEs, matching
+them to packages, proposing triage, generating VEX. Humans stay where
+judgment is needed. The output matters as much as the automation: published
+VEX files and release notes let users and outside security teams see which
+CVEs affect a release and why, without asking us.
 
-A package may contain vulnerable code upstream while Flatcar builds it without that code, or does not ship it at all. Those findings still need an answer in VEX, and the useful part is the reason, not just the verdict.
+A package may contain vulnerable code upstream while Flatcar builds it
+without that code, or does not ship it at all. Those findings still need an
+answer in VEX, and the useful part is the reason, not just the verdict.
 
-The harder case is decay. Package `abc` 1.2 is built with `-someflag`, which disables the vulnerable feature, so the CVE is marked `not_affected`. Later the flag is dropped while `abc` stays at 1.2. The version did not change, but the decision is now wrong. Today the nearest thing to a recorded "not affected" is the hand-maintained `GLSA_ALLOWLIST` in the image build (see [`current-state.md`](https://github.com/flatcar/vex-automation/blob/main/docs/current-state.md)) plus prose in advisory issues. Neither is structured enough for a machine to recheck.
+The harder case is decay. Package `abc` 1.2 is built with `-someflag`, which
+disables the vulnerable feature, so the CVE is marked `not_affected`. Later
+the flag is dropped while `abc` stays at 1.2. The version did not change, but
+the decision is now wrong. Today the nearest thing to a recorded "not
+affected" is the hand-maintained `GLSA_ALLOWLIST` in the image build (see
+[`current-state.md`](https://github.com/flatcar/vex-automation/blob/main/docs/current-state.md))
+plus prose in advisory issues. Neither is structured enough for a machine to
+recheck.
 
 ## Pipeline
 
-The pipeline is three loops that talk to each other through shared state. The **triage loop** and the **package loop** run continuously and independently of releases (in practice on a scheduler, not literally nonstop). The triage loop looks for CVEs and records decisions about them. The package loop keeps packages up to date (weekly sync today), which fixes many CVEs as a side effect. The **release loop** is event-driven: it runs once per release and channel, because it needs that release's SBOM. It builds, passes the `glsa-check` gate, reads the SBOM and generates VEX. The first two never wait for a release. Triage can also nudge the package loop: a confirmed vulnerability that needs an urgent fix (a hot fix) raises a request for an out-of-band package update instead of waiting for the weekly sync. Triage only raises the request; a maintainer still does the update. VEX describes what actually shipped, so a CVE fixed by a package update stays `affected` until a release ships it.
+The pipeline is three loops that talk to each other through shared state. The
+**triage loop** and the **package loop** run continuously and independently of
+releases (in practice on a scheduler, not literally nonstop). The triage loop
+looks for CVEs and records decisions about them. The package loop keeps
+packages up to date (weekly sync today), which fixes many CVEs as a side
+effect. The **release loop** is event-driven: it runs once per release and
+channel, because it needs that release's SBOM. It builds, passes the
+`glsa-check` gate, reads the SBOM and generates VEX. The first two never wait
+for a release. Triage can also nudge the package loop: a confirmed
+vulnerability that needs an urgent fix (a hot fix) raises a request for an
+out-of-band package update instead of waiting for the weekly sync. Triage only
+raises the request; a maintainer still does the update. VEX describes what
+actually shipped, so a CVE fixed by a package update stays `affected` until a
+release ships it.
+Initially, VEX generation can run independently of releases, to flag
+CVEs we intend to fix in future releases or to signal that we are not
+affected by a new CVE in a published release. Later it should be integrated
+into the release cycle.
 
 *Proposed, not implemented.*
 
@@ -99,11 +148,31 @@ flowchart LR
     tri -.->|"urgent: request hot fix"| pk
 ```
 
-The four ETL stages are spread over the loops. **Extract** keeps the original response, source and timestamp of every fetch; a failed source is reported as a failure, never as "no vulnerabilities". **Transform** normalizes advisories and joins them with release packages into one finding per CVE, package and release, starting as `under_investigation`. A package update can close a finding or invalidate a decision, and pending review issues get the same check. **Triage** gives the LLM one finding at a time and expects schema-validated JSON (status, VEX justification, confidence, short explanation), with status and justification restricted to the OpenVEX values. The existing `rules.py` guardrails still override the model: kernel packages, duplicates, missing evidence, SDK or sysext scope. **Load and report** generates VEX from findings, approved decisions and release facts, checking each decision's conditions first.
+The four ETL stages are spread over the loops. **Extract** keeps the original
+response, source and timestamp of every fetch; a failed source is reported as
+a failure, never as "no vulnerabilities". **Transform** normalizes advisories
+and joins them with release packages into one finding per CVE, package and
+release, starting as `under_investigation`. A package update can close a
+finding or invalidate a decision, and pending review issues get the same
+check. **Triage** gives the LLM one finding at a time and expects
+schema-validated JSON (status, VEX justification, confidence, short
+explanation), with status and justification restricted to the OpenVEX values.
+The existing `rules.py` guardrails still override the model: kernel packages,
+duplicates, missing evidence, SDK or sysext scope. **Load and report**
+generates VEX from findings, approved decisions and release facts, checking
+each decision's conditions first.
 
 ## What exists today and what is new
 
-[`current-state.md`](https://github.com/flatcar/vex-automation/blob/main/docs/current-state.md#2-overall-map) describes three loosely connected mechanisms: the `glsa-check` build gate (Path A), weekly package bumps that fix most CVEs as a side effect (Path B), and hand-written advisory issues (Path C). Packaging and CVE reporting are not linked, and nothing records in machine-readable form why a CVE does not apply. The two loops connect them: package updates feed findings, and the release SBOM is the only proof that a fix shipped. `vex-automation` is Go and `security-triage` is Python, so the shared contract has to be a file format, which is one more reason for a plain `decisions.ndjson`.
+[`current-state.md`](https://github.com/flatcar/vex-automation/blob/main/docs/current-state.md#2-overall-map)
+describes three loosely connected mechanisms: the `glsa-check` build gate
+(Path A), weekly package bumps that fix most CVEs as a side effect (Path B),
+and hand-written advisory issues (Path C). Packaging and CVE reporting are not
+linked, and nothing records in machine-readable form why a CVE does not apply.
+The two loops connect them: package updates feed findings, and the release
+SBOM is the only proof that a fix shipped. `vex-automation` is Go and
+`security-triage` is Python, so the shared contract has to be a file format,
+which is one more reason for a plain `decisions.ndjson`.
 
 | Stage | Already there | New |
 |---|---|---|
@@ -114,7 +183,14 @@ The four ETL stages are spread over the loops. **Extract** keeps the original re
 
 ## Rollout
 
-The LLM triage MVP exists, so the new work is the plumbing around it. Start in `flatcar/security-triage` only. First add the shared finding record and a `decisions.ndjson` that `vex-automation` reads. Then let review issues record decisions through a new checkbox action. Then add condition checks and publish `not_affected`. Later, open findings could steer which packages the weekly sync bumps first, and `GLSA_ALLOWLIST` could be generated from decisions so the build gate and VEX cannot disagree. Nothing points at `flatcar/Flatcar` until this has run safely for a while and a maintainer decides.
+The LLM triage MVP exists, so the new work is the plumbing around it. Start in
+`flatcar/security-triage` only. First add the shared finding record and a
+`decisions.ndjson` that `vex-automation` reads. Then let review issues record
+decisions through a new checkbox action. Then add condition checks and publish
+`not_affected`. Later, open findings could steer which packages the weekly
+sync bumps first, and `GLSA_ALLOWLIST` could be generated from decisions so
+the build gate and VEX cannot disagree. Nothing points at `flatcar/Flatcar`
+until this has run safely for a while and a maintainer decides.
 
 ## Decisions and review
 
@@ -134,7 +210,9 @@ A decision record could look like this:
 }
 ```
 
-The `conditions` field is what makes a decision checkable; without it, a decision is just a suppression. Only a maintainer decision moves a finding to `not_affected`, and changed conditions send it back.
+The `conditions` field is what makes a decision checkable; without it, a
+decision is just a suppression. Only a maintainer decision moves a finding to
+`not_affected`, and changed conditions send it back.
 
 ```mermaid
 stateDiagram-v2
@@ -147,17 +225,43 @@ stateDiagram-v2
     fixed --> [*]
 ```
 
-Review reuses the existing flow: a review issue with checkboxes, a maintainer closing it as Completed, and `review apply` re-reading the issue before acting. Recording a decision is one more checkbox action. I suggest storing decisions in git, so pull requests give review and history and VEX generation reads them directly. Today a review's replayable state is a manifest embedded in the review issue; that stays as the record of one batch, and the decision file becomes the record across batches. The catch is that `review apply` would need to write to git, for example by opening a pull request, and its workflow only holds `issues: write` today.
+Review reuses the existing flow: a review issue with checkboxes, a maintainer
+closing it as Completed, and `review apply` re-reading the issue before
+acting. Recording a decision is one more checkbox action. I suggest storing
+decisions in git, so pull requests give review and history and VEX generation
+reads them directly. Today a review's replayable state is a manifest embedded
+in the review issue; that stays as the record of one batch, and the decision
+file becomes the record across batches. The catch is that `review apply` would
+need to write to git, for example by opening a pull request, and its workflow
+only holds `issues: write` today.
 
-One issue per CVE does not fit, since a CVE can touch several packages and releases. Grouped review issues plus one canonical record per CVE is the simplest option.
+One issue per CVE does not fit, since a CVE can touch several packages and
+releases. Review issues are grouped per release and affected package, which
+matches how advisory issues work today and keeps tracking simple; a batch
+could be laid out as a table, to be iterated on. Decisions are stored
+separately, keyed by CVE, package and release or scope, so independent
+package decisions stay independent.
 
 ## Releases and revalidation
 
-Every CVE that matches a release stays listed in its VEX. A decision does not remove it; it changes the status and adds the reason.
+Every CVE that matches a release stays listed in its VEX. A decision does not
+remove it; it changes the status and adds the reason.
 
-A decision can apply to one release, a version range, a USE flag state, or every build where its conditions hold, so maintainers do not repeat it per release. This builds on the rolling-forward mechanic in `plan.md` §5; the difference is that a carried-forward `not_affected` is rechecked against its conditions instead of copied blindly. The checks are an SBOM diff against the release where the decision was made, a comparison of the relevant build configuration, and a matcher rerun on every release. If the build system does not expose enough configuration (question 2), tie decisions to specific release and package records first and broaden later.
+A decision can apply to one release, a version range, a USE flag state, or
+every build where its conditions hold, so maintainers do not repeat it per
+release. This builds on the rolling-forward mechanic in `plan.md` §5; the
+difference is that a carried-forward `not_affected` is rechecked against its
+conditions instead of copied blindly. The checks are an SBOM diff against the
+release where the decision was made, a comparison of the relevant build
+configuration, and a matcher rerun on every release. If the build system does
+not expose enough configuration (question 2, for example via the SLSA
+provenance), tie decisions to specific release and package records first and
+broaden later.
 
-Contradictions (an invalid justification, or `component_not_present` while the component is present) fail the run. Changed conditions re-queue the finding. Reports list new findings, invalidated decisions and overridden LLM proposals. At generation time each finding takes one of these paths:
+Contradictions (an invalid justification, or `component_not_present` while the
+component is present) fail the run. Changed conditions re-queue the finding.
+Reports list new findings, invalidated decisions and overridden LLM
+proposals. At generation time each finding takes one of these paths:
 
 ```mermaid
 flowchart TD
@@ -188,8 +292,9 @@ flowchart TD
 | Human input | `plan.md` §8: `vex/*` labels on advisory issues | A structured file with conditions is authoritative; labels may stay as the reviewer gesture |
 | Source precedence | `multi-source-proposal.md` §5: human override, GLSA, OSV.dev, kernel feed, oss-security | Same order. Unreviewed LLM proposals are never published |
 | Deterministic VEX | `plan.md` Decision Log #2: every statement traces to published facts; AI triage deferred | Still holds: only maintainer-approved decisions reach VEX. This is that later phase |
-| Retroactive VEX changes | `plan.md` open questions 7 and 8: unresolved | If published VEX is immutable, correct new releases only or bump the document version |
+| Retroactive VEX changes | `plan.md` open questions 7 and 8: unresolved | Published VEX has to be correctable, since that is how new vulnerabilities in published releases are communicated. A backfilling job is a later stage |
 | Scope and kernel | `advisory/only-sdk`, `advisory/sysext` and kernel CVEs have their own flows | Unchanged; the existing guardrails route these to manual review or the regular kernel flow |
+
 
 ## Edge cases
 
@@ -213,7 +318,14 @@ flowchart TD
 
 ## Appendix: example deployment
 
-Illustrative only; nothing here is decided. It would most likely be hosted on Oracle Cloud or Akamai. The LLMs would run on Oracle, because that is the only place we have them. Everything can also start as scheduled GitHub Actions jobs writing files to a git repository; this shows where the stores and jobs could live once they outgrow that. The triage and package jobs run on a schedule, the release job is triggered by a release build. Akamai is shown as an optional public edge for the VEX files; the same layout works with Akamai compute and object storage instead of OCI.
+Illustrative only; nothing here is decided. It would most likely be hosted on
+Oracle Cloud or Akamai. The LLMs would run on Oracle, because that is the only
+place we have them. Everything can also start as scheduled GitHub Actions jobs
+writing files to a git repository; this shows where the stores and jobs could
+live once they outgrow that. The triage and package jobs run on a schedule,
+the release job is triggered by a release build. Akamai is shown as an
+optional public edge for the VEX files; the same layout works with Akamai
+compute and object storage instead of OCI.
 
 ![Example deployment on Oracle Cloud with an optional Akamai CDN](diagrams/deployment-architecture.png)
 
