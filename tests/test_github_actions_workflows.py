@@ -289,3 +289,49 @@ def test_both_review_workflows_are_valid_yaml_documents():
     for path in (SCHEDULED_WORKFLOW_PATH, APPLY_WORKFLOW_PATH):
         document = _load(path)
         assert document["jobs"], f"{path.name} must declare at least one job"
+
+
+def test_agent_poc_runs_only_on_its_branch_with_read_only_permissions():
+    document = _load(WORKFLOWS_DIR / "cve-investigation-poc.yml")
+    assert _triggers(document) == {
+        "push": {"branches": ["john15321/cve-ai-agnet-trooubleshooting-poc"]}
+    }
+    assert document["permissions"] == {"contents": "read"}
+    job = document["jobs"]["investigate"]
+    assert job["runs-on"] == "ubuntu-24.04"
+    assert job["timeout-minutes"] == 20
+    checkouts = [
+        step
+        for step in job["steps"]
+        if step.get("uses", "").startswith("actions/checkout@")
+    ]
+    assert len(checkouts) == 1, "Pi itself must download the investigation source"
+    assert all(step["with"]["persist-credentials"] is False for step in checkouts)
+
+
+def test_agent_poc_secret_is_step_scoped_and_only_markdown_is_uploaded():
+    document = _load(WORKFLOWS_DIR / "cve-investigation-poc.yml")
+    job = document["jobs"]["investigate"]
+    assert "env" not in document and "env" not in job
+    secret_steps = [
+        step for step in job["steps"] if "CLAUDE_API_TEST" in step.get("env", {})
+    ]
+    assert len(secret_steps) == 1
+    assert secret_steps[0]["env"] == {
+        "CLAUDE_API_TEST": "${{ secrets.CLAUDE_API_TEST }}"
+    }
+    assert "python -m security_triage.agent_poc" in secret_steps[0]["run"]
+    assert "--case-file poc/cve-investigation.yaml" in secret_steps[0]["run"]
+    assert (
+        '--scripts-directory "$RUNNER_TEMP/cve-investigation/scripts"'
+        in secret_steps[0]["run"]
+    )
+    assert "--output reports/cve-investigation/report.md" in secret_steps[0]["run"]
+    uploads = [
+        step
+        for step in job["steps"]
+        if step.get("uses", "").startswith("actions/upload-artifact@")
+    ]
+    assert len(uploads) == 1
+    assert uploads[0]["with"]["path"] == "reports/cve-investigation/report.md"
+    assert uploads[0]["with"]["if-no-files-found"] == "error"
