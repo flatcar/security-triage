@@ -1,0 +1,8 @@
+stateDiagram-v2
+    [*] --> under_investigation: advisory matches
+    under_investigation --> not_affected: decision approved
+    under_investigation --> affected: confirmed vulnerable
+    under_investigation --> fixed: fix ships
+    affected --> fixed: fix ships
+    not_affected --> under_investigation: conditions changed
+    fixed --> [*]

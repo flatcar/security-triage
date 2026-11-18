@@ -1,0 +1,39 @@
+flowchart LR
+    classDef source fill:#dbeafe,stroke:#2563eb,color:#000
+    classDef process fill:#dcfce7,stroke:#15803d,color:#000
+    classDef store fill:#fef3c7,stroke:#a16207,color:#000
+    classDef model fill:#ede9fe,stroke:#7c3aed,color:#000
+    classDef gate fill:#fee2e2,stroke:#b91c1c,color:#000
+
+    subgraph tri["Triage loop: continuous"]
+        direction TB
+        adv[/"Advisory sources"/]:::source
+        find["Extract + Transform<br/>match packages<br/>to advisories"]:::process
+        findings[("Findings")]:::store
+        llm["Triage<br/>LLM proposes"]:::model
+        approve{"Maintainer<br/>approves"}:::gate
+        decisions[("Decisions and<br/>their conditions")]:::store
+        adv --> find --> findings --> llm --> approve --> decisions
+    end
+
+    subgraph pk["Package loop: continuous"]
+        direction TB
+        pkg["Package update<br/>(weekly sync)"]:::process
+        vers[("Package versions")]:::store
+        pkg --> vers
+    end
+
+    subgraph rel["Release loop: per release"]
+        direction TB
+        build["Build +<br/>glsa-check gate"]:::process
+        sbom[("Release SBOM +<br/>build config")]:::store
+        vex["Load and report<br/>revalidate decisions,<br/>generate VEX"]:::process
+        out[("Published VEX<br/>+ release notes")]:::store
+        build --> sbom --> vex --> out
+    end
+
+    pk ==>|"new versions close findings<br/>and invalidate decisions"| tri
+    tri ==>|"approved decisions<br/>and open findings"| rel
+    pk ==>|"what to build"| rel
+    rel -.->|"release facts, gate failures:<br/>recheck decisions, reopen findings"| tri
+    tri -.->|"urgent: request hot fix"| pk

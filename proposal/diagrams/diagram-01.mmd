@@ -1,0 +1,13 @@
+flowchart LR
+    classDef source fill:#dbeafe,stroke:#2563eb,color:#000
+    classDef process fill:#dcfce7,stroke:#15803d,color:#000
+    classDef store fill:#fef3c7,stroke:#a16207,color:#000
+    classDef model fill:#ede9fe,stroke:#7c3aed,color:#000
+    classDef gate fill:#fee2e2,stroke:#b91c1c,color:#000
+
+    l1[/"External source"/]:::source
+    l2["Process"]:::process
+    l3[("Durable store<br/>(can start as files)")]:::store
+    l4["LLM step"]:::model
+    l5{"Human gate"}:::gate
+    l1 ~~~ l2 ~~~ l3 ~~~ l4 ~~~ l5

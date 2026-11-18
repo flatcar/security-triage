@@ -1,0 +1,19 @@
+flowchart TD
+    classDef process fill:#dcfce7,stroke:#15803d,color:#000
+    classDef gate fill:#fee2e2,stroke:#b91c1c,color:#000
+    classDef result fill:#dbeafe,stroke:#2563eb,color:#000
+
+    q1{"CVE x package x release:<br/>SBOM already has<br/>the fixed version?"}:::gate
+    q2{"Approved<br/>decision exists?"}:::gate
+    q3{"Its conditions still<br/>hold in this release?"}:::gate
+    fixed["fixed"]:::result
+    na["not_affected<br/>+ justification and rationale<br/>from the decision"]:::result
+    ui["under_investigation<br/>re-queued for review"]:::result
+    aff["affected<br/>(under_investigation while<br/>triage is pending)"]:::result
+
+    q1 -->|"yes"| fixed
+    q1 -->|"no"| q2
+    q2 -->|"no"| aff
+    q2 -->|"yes"| q3
+    q3 -->|"yes"| na
+    q3 -->|"no"| ui
