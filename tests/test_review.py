@@ -610,6 +610,10 @@ def test_discovery_ignore_and_kernel_groups_are_single_checkbox_no_payload():
     assert len({candidate.action_id for candidate in ignore_groups[0].candidates}) == 3
     assert len({candidate.group_id for candidate in ignore_groups[0].candidates}) == 1
 
+    counts = review._render_counts_table(ignore_groups)
+    assert "| discovery_ignore | 1 |" in counts
+    assert "| discovery_create_issue | 1 |" not in counts
+
     assert kernel_groups[0].candidates[0].kind == review.DISCOVERY_KIND_KERNEL
     assert kernel_groups[0].candidates[0].payload == {}
 

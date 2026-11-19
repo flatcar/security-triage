@@ -629,6 +629,7 @@ _DISCOVERY_KIND_BY_ACTION = {
     "update_existing_issue": DISCOVERY_KIND_UPDATE,
     "ignore": DISCOVERY_KIND_IGNORE,
     "kernel_regular_update_flow": DISCOVERY_KIND_KERNEL,
+    "needs_manual_review": DISCOVERY_KIND_MANUAL,
 }
 _CLEANUP_KIND_BY_ACTION = {
     "comment_only": CLEANUP_KIND_COMMENT_ONLY,
@@ -1357,12 +1358,17 @@ def _group_severity(group: DecisionGroup) -> str:
     return label.replace("cvss/", "") if label else "n/a"
 
 
+def _group_recommendation(group: DecisionGroup) -> str:
+    if group.source == "discovery":
+        action = (group.record.get("decision") or {}).get("action")
+        return _DISCOVERY_KIND_BY_ACTION.get(action or "", "unknown")
+    return group.candidates[0].kind if group.candidates else "unknown"
+
+
 def _render_counts_table(groups: list[DecisionGroup]) -> list[str]:
     if not groups:
         return ["", "(no decision groups)"]
-    kind_counts = Counter(
-        group.candidates[0].kind if group.candidates else "unknown" for group in groups
-    )
+    kind_counts = Counter(_group_recommendation(group) for group in groups)
     confidence_counts = Counter(_group_confidence(group) for group in groups)
     severity_counts = Counter(_group_severity(group) for group in groups)
     lines = ["", "| Recommendation | Count |", "| --- | --- |"]
