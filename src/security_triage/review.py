@@ -775,7 +775,7 @@ def _discovery_normal_group(
         payload = _update_payload(record, target_issue)
         label = f"Update existing issue #{target_issue} with new upstream context"
     elif kind == DISCOVERY_KIND_IGNORE:
-        label = "Acknowledge: no advisory action needed"
+        return _discovery_manual_group(record)
     elif kind == DISCOVERY_KIND_KERNEL:
         label = (
             "Acknowledge: routed to the regular kernel update flow (no advisory issue)"
