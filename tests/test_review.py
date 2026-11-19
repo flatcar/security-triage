@@ -598,8 +598,22 @@ def test_discovery_ignore_and_kernel_groups_are_single_checkbox_no_payload():
     ignore_groups = review.build_discovery_groups(ignore_document)
     kernel_groups = review.build_discovery_groups(kernel_document)
 
-    assert ignore_groups[0].candidates[0].kind == review.DISCOVERY_KIND_IGNORE
-    assert ignore_groups[0].candidates[0].payload == {}
+    # Since ignore_groups result is coming from _discovery_manual_group(),
+    # we would like to have a different set of tests from KIND_KERNEL for KIND_IGNORE.
+    kinds = [candidate.kind for candidate in ignore_groups[0].candidates]
+
+    assert kinds == [
+        review.DISCOVERY_KIND_CREATE,
+        review.DISCOVERY_KIND_IGNORE,
+        review.DISCOVERY_KIND_MANUAL,
+    ]
+    assert len({candidate.action_id for candidate in ignore_groups[0].candidates}) == 3
+    assert len({candidate.group_id for candidate in ignore_groups[0].candidates}) == 1
+
+    counts = review._render_counts_table(ignore_groups)
+    assert "| discovery_ignore | 1 |" in counts
+    assert "| discovery_create_issue | 1 |" not in counts
+
     assert kernel_groups[0].candidates[0].kind == review.DISCOVERY_KIND_KERNEL
     assert kernel_groups[0].candidates[0].payload == {}
 
