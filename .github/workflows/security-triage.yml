@@ -96,7 +96,7 @@ jobs:
           FOUNDRY_EXTRACTION_DEPLOYMENT: ${{ vars.FOUNDRY_EXTRACTION_DEPLOYMENT }}
           FOUNDRY_API_VERSION: ${{ vars.FOUNDRY_API_VERSION }}
           FLATCAR_PROMPT_CACHE_DIR: .prompt-cache
-          SBOM_SOURCE: ${{ case(inputs.use_repo_nightly_sdk == true, 'nightly', 'alpha' ) }}
+          SBOM_SOURCE: ${{ case(github.event_name != 'workflow_dispatch' || inputs.use_repo_nightly_sdk == true, 'nightly', 'alpha') }}
         run: |
           security-triage discovery \
             --model foundry \
