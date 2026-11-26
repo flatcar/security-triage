@@ -15,6 +15,13 @@ on:
   schedule:
     - cron: '0 6 * * 1,4'
   workflow_dispatch:
+    inputs:
+      use_repo_nightly_sdk:
+        type: boolean
+        description: |
+          Use SDK version from version.txt instead of the last release.
+        required: true
+        default: true
 
 concurrency:
   # Serialize daily runs so a new schedule tick can never race an
@@ -89,13 +96,15 @@ jobs:
           FOUNDRY_EXTRACTION_DEPLOYMENT: ${{ vars.FOUNDRY_EXTRACTION_DEPLOYMENT }}
           FOUNDRY_API_VERSION: ${{ vars.FOUNDRY_API_VERSION }}
           FLATCAR_PROMPT_CACHE_DIR: .prompt-cache
+          SBOM_SOURCE: ${{ case(github.event_name != 'workflow_dispatch' || inputs.use_repo_nightly_sdk == true, 'nightly', 'alpha') }}
         run: |
           security-triage discovery \
             --model foundry \
             --advisory-repo "$SECURITY_TRIAGE_ADVISORY_REPO" \
             --output reports/discovery.json \
             --markdown-output reports/discovery.md \
-            --debug-log reports/discovery-debug.jsonl
+            --debug-log reports/discovery-debug.jsonl \
+            --sbom-source "$SBOM_SOURCE"
 
       - name: Save prompt cache
         if: always()
